@@ -1,5 +1,6 @@
 # EEMBC CoreMark (submodule in coremark/) with the bare-metal Pulse port in
-# port/. ITERATIONS defaults to 10, which runs in a few million cycles.
+# port/. ITERATIONS defaults to 10, which runs in a few million cycles; the
+# objects do not depend on it, so change it with "make clean all ITERATIONS=n".
 
 PROG := coremark
 

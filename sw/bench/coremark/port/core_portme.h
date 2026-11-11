@@ -10,7 +10,8 @@
 #include <stdint.h>
 #include "soc.h"
 
-/* Number of benchmark iterations; override with make ITERATIONS=n. */
+/* Number of benchmark iterations; override with
+ * make -C sw/bench/coremark clean all ITERATIONS=n. */
 #ifndef ITERATIONS
 #define ITERATIONS 10
 #endif
