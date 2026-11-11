@@ -94,7 +94,7 @@ struct Machine {
     // Runs with a commit log and returns its text.
     std::string run_logged(uint64_t max_instret, StopReason* reason = nullptr) {
         std::FILE* f = std::tmpfile();
-        StopReason r;
+        StopReason r = StopReason::kMaxInstret;
         {
             iss::CommitLog log(f);
             r = cpu.run(max_instret, &log);
@@ -445,7 +445,7 @@ TEST(commit_log_matches_spec_format) {
         0x0002a823,  // 2c: sw zero, 16(t0)      SIM_EXIT
         enc::kNop,   // 30: never reached
     });
-    StopReason reason;
+    StopReason reason = StopReason::kMaxInstret;
     const std::string log = m.run_logged(100, &reason);
     CHECK_EQ(reason, StopReason::kExit);
     CHECK_STR_EQ(log,
@@ -532,7 +532,7 @@ TEST(halting_instructions) {
     for (const Case& c : cases) {
         Machine m;
         m.program({enc::addi(1, 0, 1), c.insn, enc::addi(2, 0, 1)});
-        StopReason reason;
+        StopReason reason = StopReason::kMaxInstret;
         const std::string log = m.run_logged(100, &reason);
         CHECK_EQ(reason, c.reason);
         CHECK_EQ(m.cpu.instret(), 2u);  // the halting instruction retires

@@ -17,9 +17,9 @@ void report_str_eq(const std::string& actual, const std::string& expected, const
 
 }  // namespace check
 
-#define TEST(name)                                                         \
-    static void name();                                                    \
-    static const bool name##_registered = check::register_test(#name, name); \
+#define TEST(name)                                                                          \
+    static void name();                                                                     \
+    [[maybe_unused]] static const bool name##_registered = check::register_test(#name, name); \
     static void name()
 
 // Both sides are widened to 64 bits before comparing, so compare values of
