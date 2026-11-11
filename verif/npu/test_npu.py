@@ -205,8 +205,12 @@ class Testbench:
             self.mem.write(op.bias_addr, op.bias.astype("<i4").tobytes())
 
     async def run_op(self, op: Op) -> int:
+        """Run a valid operation; rejected ones go through configure() and start()."""
         self.place(op)
         await self.configure(op.regs)
+        # A shape that does not fit this ARR / KMAX would pass as an ERR and test
+        # nothing, so it is a bug in the test.
+        assert self.model.params_ok(), f"test asks for an invalid operation: {op.describe()}"
         return await self.start(op.ctrl, what=op.describe())
 
     async def start(self, ctrl: int, what: str = "", during=None) -> int:
@@ -399,12 +403,17 @@ async def test_register_readback(dut):
 async def test_known_values(dut):
     """A small hand-checkable product, INT32 out with bias."""
     tb = await Testbench.create(dut, "known")
-    m, n = min(2, ARR), min(3, ARR)
-    a = np.array([[1, 2, 3, 4, 5], [-1, -2, -3, -4, -5]], dtype=np.int64)[:m]
-    b = np.array([[1, 0, 0, 0, 0], [1, 1, 1, 1, 1], [-128, 127, -128, 127, 2]], dtype=np.int64)[:n]
-    bias = np.array([100, -100, 7], dtype=np.int64)[:n]
-    await tb.run_op(Op(a=a, b=b, bias=bias))
-    want = [[101, -85, 267], [99, -115, -253]]
+    m, n, k = min(2, ARR), min(3, ARR), min(5, KMAX)
+    a = [[1, 2, 3, 4, 5], [-1, -2, -3, -4, -5]]
+    b = [[1, 0, 0, 0, 0], [1, 1, 1, 1, 1], [-128, 127, -128, 127, 2]]
+    bias = [100, -100, 7]
+    want = [[101, -85, 267], [99, -115, -253]]     # worked by hand for K = 5
+    if k < 5:                                      # KMAX < 5: the first K columns
+        want = [[sum(a[i][x] * b[j][x] for x in range(k)) + bias[j] for j in range(3)]
+                for i in range(2)]
+    await tb.run_op(Op(a=np.array(a, dtype=np.int64)[:m, :k],
+                       b=np.array(b, dtype=np.int64)[:n, :k],
+                       bias=np.array(bias, dtype=np.int64)[:n]))
     for i in range(m):
         for j in range(n):
             got = s32(tb.mem.read32(C_REGION + 4 * (n * i + j)))
@@ -417,7 +426,7 @@ async def test_shapes(dut):
     tb = await Testbench.create(dut, "shapes")
     for m in range(1, ARR + 1):
         for n in range(1, ARR + 1):
-            k = tb.rng.randint(1, 9)
+            k = tb.rng.randint(1, min(9, KMAX))
             await tb.run_op(Op(a=tb.matrix(m, k), b=tb.matrix(n, k)))
     ks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 64, 255, KMAX - 3, KMAX - 2, KMAX - 1, KMAX]
     for k in sorted({max(1, min(k, KMAX)) for k in ks}):
@@ -435,7 +444,7 @@ async def test_relu_bias(dut):
     for out_int8 in (False, True):
         for relu in (False, True):
             for span in (1 << 10, 1 << 31):
-                m, n, k = ARR, ARR, tb.rng.randint(1, 100)
+                m, n, k = ARR, ARR, tb.rng.randint(1, min(100, KMAX))
                 bias = tb.np_rng.integers(-span, span, size=n, dtype=np.int64)
                 await tb.run_op(Op(a=tb.matrix(m, k), b=tb.matrix(n, k), bias=bias,
                                    quant=quant(12, out_int8, relu), qmult=3))
@@ -464,7 +473,8 @@ async def test_requant_edges(dut):
                                        bias=np.array(lane_vs, dtype=np.int64),
                                        quant=quant(shift, True, relu), qmult=qmult))
     # QMULT's upper half is ignored by the arithmetic but still read back.
-    await tb.run_op(Op(a=tb.matrix(ARR, 32), b=tb.matrix(ARR, 32),
+    k = min(32, KMAX)
+    await tb.run_op(Op(a=tb.matrix(ARR, k), b=tb.matrix(ARR, k),
                        quant=quant(9, True), qmult=0xBEEF_FFFD))
 
 
@@ -487,7 +497,7 @@ async def test_strides(dut):
     """Row strides larger than the row length (and zero) on A, B and C."""
     tb = await Testbench.create(dut, "strides")
     for i in range(16):
-        m, n, k = ARR, tb.rng.randint(1, ARR), tb.rng.randint(1, 200)
+        m, n, k = ARR, tb.rng.randint(1, ARR), tb.rng.randint(1, min(200, KMAX))
         out_int8 = bool(i & 1)
         out_bytes = n if out_int8 else 4 * n
         strides = [round4(k) + 4 * tb.rng.randint(1, 300), round4(k) + 4 * tb.rng.randint(1, 300),
@@ -565,7 +575,7 @@ async def test_k_split(dut):
     tb = await Testbench.create(dut, "k_split")
     for out_int8 in (False, True):
         m, n = ARR, tb.rng.randint(1, ARR)
-        chunks = [KMAX, tb.rng.randint(1, KMAX), tb.rng.randint(1, 9)]
+        chunks = [KMAX, tb.rng.randint(1, KMAX), tb.rng.randint(1, min(9, KMAX))]
         a = tb.matrix(m, sum(chunks))
         b = tb.matrix(n, sum(chunks))
         bias = tb.np_rng.integers(-1000, 1000, size=n, dtype=np.int64)
@@ -591,10 +601,11 @@ async def test_k_split(dut):
 async def test_acc_keep_partial(dut):
     """ACC_KEEP on a smaller tile leaves the other accumulators untouched."""
     tb = await Testbench.create(dut, "acc_keep_partial")
-    full = Op(a=tb.matrix(ARR, 33), b=tb.matrix(ARR, 33), ctrl=CTRL_NO_WB)
+    k = min(33, KMAX)
+    full = Op(a=tb.matrix(ARR, k), b=tb.matrix(ARR, k), ctrl=CTRL_NO_WB)
     await tb.run_op(full)
     for m, n in ((1, 1), (ARR, 1), (1, ARR), (max(1, ARR - 1), max(1, ARR // 2))):
-        k = tb.rng.randint(1, 70)
+        k = tb.rng.randint(1, min(70, KMAX))
         await tb.run_op(Op(a=tb.matrix(m, k), b=tb.matrix(n, k), ctrl=CTRL_ACC_KEEP | CTRL_NO_WB))
     # Read every accumulator out through a K = 1 product of zeros.
     await tb.run_op(Op(a=np.zeros((ARR, 1), dtype=np.int64), b=tb.matrix(ARR, 1),
@@ -633,8 +644,9 @@ async def test_operand_reuse(dut):
         ("A_STRIDE", (True, False), dict(a_stride=round4(k) + 4)),
         ("B_ADDR", (False, True), dict(b_addr=B_REGION + 8 + 16)),
         ("B_STRIDE", (False, True), dict(b_stride=round4(k) + 12)),
-        ("K", (True, True), dict(a=a[:, :k - 1], b=b[:, :k - 1])),
     ]
+    if k > 1:                       # with KMAX = 1, K cannot change and stay valid
+        misses += [("K", (True, True), dict(a=a[:, :k - 1], b=b[:, :k - 1]))]
     if ARR > 1:
         misses += [("M", (True, False), dict(a=a[:ARR - 1])),
                    ("N", (False, True), dict(b=b[:ARR - 1]))]
@@ -668,7 +680,10 @@ async def test_tiled_gemm_keep(dut):
     m_tiles, n_tiles = -(-mt // ARR), -(-nt // ARR)
     want = gemm_reference(a, b, bias, q, qmult)
     totals = {}
-    for flags in (0, CTRL_B_KEEP):
+    # The B_KEEP pass runs first, right after reset, so its first command
+    # finds no B loaded. Run second, with a single column tile (ARR = 1) its
+    # first command would already hit the tile the other pass left behind.
+    for flags in (CTRL_B_KEEP, 0):
         tb.mem.write(C_REGION, tb.rng.randbytes(mt * c_stride))
         cycles = b_loads = 0
         for n0 in range(0, nt, ARR):
@@ -698,7 +713,8 @@ async def test_errors(dut):
     """Every invalid parameter gives ERR|DONE, no memory traffic, and keeps acc."""
     tb = await Testbench.create(dut, "errors")
     # Leave known values in the accumulators, then check they survive.
-    base = Op(a=tb.matrix(ARR, 40), b=tb.matrix(ARR, 40), bias=np.arange(ARR), ctrl=CTRL_NO_WB)
+    k = min(40, KMAX)
+    base = Op(a=tb.matrix(ARR, k), b=tb.matrix(ARR, k), bias=np.arange(ARR), ctrl=CTRL_NO_WB)
     await tb.run_op(base)
     good = dict(base.regs)
     bad_values = {
@@ -766,7 +782,7 @@ async def test_int8_byte_enables(dut):
     tb = await Testbench.create(dut, "byte_enables")
     for n in range(1, ARR + 1):
         for pad in (0, 4, 12):
-            m, k = tb.rng.randint(1, ARR), tb.rng.randint(1, 50)
+            m, k = tb.rng.randint(1, ARR), tb.rng.randint(1, min(50, KMAX))
             c_stride = round4(n) + pad
             # Fresh random bytes all over the C region before each op.
             tb.mem.write(C_REGION, tb.rng.randbytes(4096))

@@ -185,8 +185,12 @@ module npu_dma #(
   end
 
   // ------------------------------------------------------------ fill side
-  logic [XW-1:0] rsp_words;   // words in the row being filled
-  assign rsp_words = (rsp_seg_q == SEG_BIAS) ? XW'(n_rows) : XW'(({2'b00, k_len} + (KW+2)'(3)) >> 2);
+  // Words in the row being filled; ceil(K / 4) is computed at a width that
+  // holds both K + 3 and the word index (either can be the wider one).
+  localparam int KWW = (XW > KW + 2) ? XW : KW + 2;
+  logic [XW-1:0] rsp_words;
+  assign rsp_words = (rsp_seg_q == SEG_BIAS) ? XW'(n_rows)
+                                             : XW'((KWW'(k_len) + KWW'(3)) >> 2);
 
   for (genvar l = 0; l < LANES; l++) begin : g_lane
     logic [LW:0]    pos;    // bus word holding this lane's word, before the wrap
