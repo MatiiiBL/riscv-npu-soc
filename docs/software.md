@@ -59,21 +59,25 @@ the link if data plus stack would not fit. The stack starts at the end of
 DMEM unless a program sets `-Wl,--defsym=STACK_TOP=...` (16-byte aligned):
 `npu_oob` does, because its cases use the last bytes of DMEM.
 
-Footprint of every program (`make -C sw size`):
+Footprint of every program (`make -C sw size`, which reads each ELF's
+`STACK_SIZE`; every program uses the default 8 KiB):
 
 | Program | IMEM (B) | DMEM (B) | DMEM incl. stack |
 |---------|---------:|---------:|-----------------:|
-| hello      |  1,856 |     417 |  3.3% |
-| printf     |  3,336 |     855 |  3.5% |
-| muldiv     |  4,312 |   1,048 |  3.5% |
-| recursion  |  3,964 |     636 |  3.4% |
-| crc32      |  3,720 |   6,768 |  5.7% |
-| sort       |  4,004 |  12,504 |  7.9% |
-| npu_gemm   | 14,616 |  76,444 | 32.3% |
-| npu_ksplit |  8,844 |  82,572 | 34.6% |
-| coremark   | 10,564 |   4,484 |  4.8% |
-| gemm       |  8,192 |  99,580 | 41.1% |
-| mnist      |  9,008 | 187,044 | 74.5% |
+| hello          |  1,856 |     417 |  3.3% |
+| printf         |  3,336 |     855 |  3.5% |
+| muldiv         |  4,312 |   1,048 |  3.5% |
+| recursion      |  3,964 |     636 |  3.4% |
+| crc32          |  3,720 |   6,768 |  5.7% |
+| sort           |  4,004 |  12,504 |  7.9% |
+| npu_gemm       | 14,980 |  76,556 | 32.3% |
+| npu_ksplit     |  9,028 |  82,576 | 34.6% |
+| npu_concurrent |  9,136 |  20,176 | 10.8% |
+| npu_oob        |  3,872 |     792 |  3.4% |
+| npu_overlap    |  2,900 |     624 |  3.4% |
+| coremark       | 10,564 |   4,484 |  4.8% |
+| gemm           |  8,300 |  99,584 | 41.1% |
+| mnist          |  9,116 | 187,048 | 74.5% |
 
 `mnist` is the largest: 102 KB of weights and 78 KB of test images.
 
@@ -288,7 +292,10 @@ lines
 BENCH <bench> <case> key=value key=value ...
 ```
 
-which are what `collect_bench.py` tabulates.
+which are what `collect_bench.py` tabulates. It exits nonzero if a
+benchmark fails, prints no `BENCH` line or runs past `--timeout` (1800 s
+by default); a benchmark that times out is killed and still listed in both
+results files, marked `TIMED OUT` (`"timed_out": true` in the JSON).
 
 **CoreMark port.** `sw/bench/coremark/coremark` is the unmodified EEMBC
 repository (a submodule); `port/` holds `core_portme.{c,h}`. Ticks are
