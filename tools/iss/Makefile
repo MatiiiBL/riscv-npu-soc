@@ -45,6 +45,20 @@ $(OBJ_DIR):
 test: $(TEST_BIN)
 	$(TEST_BIN)
 
+# The benchmark is ordinary firmware built with the sw/common runtime. The
+# second run adds commit-log formatting (to /dev/null, so no disk I/O).
+SW_COMMON := $(REPO_ROOT)/sw/common
+BENCH_ELF := $(OUT)/bench/workload.elf
+
+$(BENCH_ELF): bench/workload.c $(SW_COMMON)/crt0.S $(SW_COMMON)/lib.c $(SW_COMMON)/link.ld
+	@mkdir -p $(dir $@)
+	$(RV_CC) $(RV_FLAGS) -O2 -I$(SW_COMMON) $(RV_LDFLAGS) -T$(SW_COMMON)/link.ld \
+	  $(SW_COMMON)/crt0.S $(SW_COMMON)/lib.c bench/workload.c -o $@
+
+bench: $(ISS) $(BENCH_ELF)
+	$(ISS) --stats --max-cycles 10000000000 $(BENCH_ELF)
+	$(ISS) --stats --max-cycles 10000000000 --commit-log /dev/null $(BENCH_ELF)
+
 clean:
 	rm -rf $(OUT)
 
