@@ -65,7 +65,7 @@ static void print_path(const char *name, const path_stats_t *s, uint32_t busy) {
     char acc[RATIO_BUF], per_inf[RATIO_BUF];
     fmt_ratio(acc, s->correct * 100u, MNIST_TEST_COUNT, 2);
     fmt_ratio(per_inf, total, MNIST_TEST_COUNT, 0);
-    printf("%s: %u/%u correct (%s%%), %s cycles/inference (layer 1 %u, layer 2 %u cycles total)\n",
+    printf("%3s: %u/%u correct (%s%%), %s cycles/inference (layer 1 %u, layer 2 %u cycles total)\n",
            name, s->correct, (uint32_t)MNIST_TEST_COUNT, acc, per_inf, s->layer1, s->layer2);
     printf("BENCH mnist %s images=%u correct=%u accuracy=%s match_python=%u cycles=%u "
            "cycles_per_inference=%s layer1_cycles=%u layer2_cycles=%u npu_busy_cycles=%u\n",
@@ -119,7 +119,7 @@ int main(void) {
         }
     }
 
-    print_path("sw ", &sw, 0);
+    print_path("sw", &sw, 0);
     print_path("npu", &npu, npu_busy_cycles());
 
     char speedup[RATIO_BUF];
