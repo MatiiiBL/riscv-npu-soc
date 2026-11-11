@@ -292,8 +292,15 @@ The NPU only writes the bytes of C it produces (byte enables on partial
 words). Rows of A and B, and the bias vector, are read as the aligned
 `DMA_BYTES` blocks that cover them; the other bytes of those blocks are
 ignored. C may overlap the bias vector: the bias values from before the
-operation are used. Software must not write memory the NPU reads, or
-read memory it writes, while `BUSY` is set.
+operation are used.
+
+While `BUSY` is set, software must not read or write any DMEM word the NPU
+reads or writes: every 32-bit word of the aligned `DMA_BYTES` blocks that
+cover the rows of A and B and the bias vector, and every word holding an
+element of C, including the bytes of those words that the NPU ignores or
+leaves unchanged. The CPU and the NPU reach DMEM through the two ports of the
+same block RAMs, and same-word accesses from both ports in one cycle are
+undefined on the FPGA, for the whole word.
 
 The ISS executes an operation instantly at the `START` write (it never
 reports `BUSY`), and reports `CYCLES` = 0.
