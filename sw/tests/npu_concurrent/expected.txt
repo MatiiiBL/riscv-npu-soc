@@ -1,0 +1,4 @@
+npu_concurrent: CPU DMEM traffic during NPU DMA
+int32 8x8x1024: C ok, operands ok, CPU data ok
+int8 bias relu 8x8x1024: C ok, operands ok, CPU data ok
+PASS
