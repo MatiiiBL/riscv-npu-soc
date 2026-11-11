@@ -18,13 +18,15 @@ points at the right place:
   truncate   cut the log after line --line - 1 (the model stopped early)
   stdout     change the last UART byte (or emit one if there was none)
   exit       report a different exit code
+  cpi2       no fault: behave like an RTL model with a CPI of 2, whose
+             --max-cycles N lets only N / 2 instructions retire
 """
 
 import argparse
 import subprocess
 import sys
 
-FAULTS = ["none", "rd_wdata", "wdata", "load_addr", "pc", "drop", "extra", "truncate", "stdout", "exit"]
+FAULTS = ["none", "rd_wdata", "wdata", "load_addr", "pc", "drop", "extra", "truncate", "stdout", "exit", "cpi2"]
 LOG_FAULTS = ["rd_wdata", "wdata", "load_addr", "pc", "drop", "extra", "truncate"]
 
 
@@ -83,6 +85,9 @@ def main():
     if not sim:
         parser.error("missing simulator command")
 
+    if args.fault == "cpi2" and "--max-cycles" in sim:
+        at = sim.index("--max-cycles") + 1
+        sim[at] = str(int(sim[at]) // 2)
     proc = subprocess.run(sim, stdout=subprocess.PIPE)
     stdout, code = proc.stdout, proc.returncode
     if args.fault in LOG_FAULTS:

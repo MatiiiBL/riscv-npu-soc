@@ -156,6 +156,14 @@ both models agree on a nonzero exit.
 `llvm-objdump` comes from `--objdump`, then `$RV_OBJDUMP`, then the path
 `mk/toolchain.mk` detects, then `PATH`.
 
+`--max-cycles N` is the RTL's budget in clock cycles; the ISS counts retired
+instructions instead (spec 7.1). difftest runs the RTL first and gives the ISS
+an instruction limit of `N`, which can never stop it first because the RTL
+retires at most one instruction per cycle. If the RTL uses up its budget, the
+ISS is stopped after exactly as many instructions as the RTL retired, so both
+logs cover the same instructions and both runs end with 124; the report says
+so, and `--expect-exit 0` makes it a failure.
+
 A commit-log comparison is exact, so it only applies to programs whose
 instruction stream does not depend on timing: no `cycle`/`time` reads and no
 polling of NPU `STATUS`, since the RTL stays busy for many cycles and its poll

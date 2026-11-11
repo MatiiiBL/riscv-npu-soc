@@ -10,6 +10,16 @@ report shows the first differing commit-log line from each model with the
 lines before it, which fields differ, and the disassembly of the
 instruction at that pc.
 
+`--max-cycles` counts clock cycles on the RTL but retired instructions on
+the ISS (spec 7.1), so the same number would end the two runs at different
+points. difftest therefore treats it as the RTL's budget: the RTL runs
+first, and the ISS gets the same number as its instruction limit, which can
+never stop it first because the RTL retires at most one instruction per
+cycle. If the RTL uses up its budget, the ISS is stopped after exactly as
+many instructions as the RTL retired, so the two logs cover the same
+instructions and both runs end with exit code 124. `--expect-exit 0` turns
+that into a failure for programs that must finish.
+
 Exit status: 0 match, 1 mismatch, 2 usage or tool error.
 """
 
@@ -29,6 +39,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIELDS = ["pc", "insn", "rd", "rd_wdata", "mem_addr", "wmask", "wdata"]
 TOOL_ERROR = 125  # simulator exit code for usage/ELF/I-O errors (spec 7.1)
+LIMIT_REACHED = 124  # exit code when --max-cycles runs out (spec 7.1)
+DEFAULT_MAX_CYCLES = 100_000_000  # both simulators' default (spec 7.1)
 
 
 class ToolError(Exception):
@@ -47,15 +59,16 @@ class Run:
         self.timed_out = timed_out
 
 
-def run_model(name, command, elf, work, stem, args):
+def run_model(name, command, elf, work, stem, limit, timeout):
+    """Runs one simulator; `limit` is its --max-cycles value (None: its default)."""
     commit = work / f"{stem}.{name}.commit"
     argv = list(command) + ["--commit-log", str(commit)]
-    if args.max_cycles is not None:
-        argv += ["--max-cycles", str(args.max_cycles)]
+    if limit is not None:
+        argv += ["--max-cycles", str(limit)]
     argv.append(str(elf))
     timed_out = False
     try:
-        proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=args.timeout)
+        proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     except FileNotFoundError:
         raise ToolError(f"{name} simulator not found: {argv[0]}")
@@ -71,6 +84,11 @@ def run_model(name, command, elf, work, stem, args):
     if not commit.exists():
         commit.write_bytes(b"")
     return Run(name, commit, code, stdout, stderr.decode(errors="replace"), timed_out)
+
+
+def count_lines(path):
+    with open(path, "rb") as f:
+        return sum(1 for _ in f)
 
 
 def first_difference(path_a, path_b, context):
@@ -212,15 +230,22 @@ def compare(args):
     work.mkdir(parents=True, exist_ok=True)
     stem = elf.stem
 
+    budget = args.max_cycles if args.max_cycles is not None else DEFAULT_MAX_CYCLES
+    note = None
     try:
-        runs = (run_model("rtl", shlex.split(args.rtl), elf, work, stem, args),
-                run_model("iss", shlex.split(args.iss), elf, work, stem, args))
+        rtl = run_model("rtl", shlex.split(args.rtl), elf, work, stem, args.max_cycles, args.timeout)
+        iss_limit = budget
+        if rtl.code == LIMIT_REACHED:
+            iss_limit = count_lines(rtl.commit)
+            note = (f"  the rtl used its whole budget of {budget} cycles after {iss_limit} instructions; "
+                    f"the iss was stopped after as many")
+        iss = run_model("iss", shlex.split(args.iss), elf, work, stem, iss_limit, args.timeout)
     except ToolError:
         if not keep:
             shutil.rmtree(work)
         raise
-    rtl, iss = runs
-    out = []
+    runs = (rtl, iss)
+    out = [note] if note else []
     diff = first_difference(rtl.commit, iss.commit, args.context)
     if diff is not None:
         report_commit(diff, runs, find_objdump(args.objdump), elf, out)
@@ -233,10 +258,11 @@ def compare(args):
         out.append(f"  both models exited with {rtl.code}, expected {args.expect_exit}")
 
     if diff is None and stdout_ok and endings_ok:
-        with open(rtl.commit, "rb") as f:
-            lines = sum(1 for _ in f)
         if not args.quiet:
+            lines = count_lines(rtl.commit)
             print(f"difftest PASS: {elf} ({lines} instructions, {len(rtl.stdout)} stdout bytes, exit {rtl.code})")
+            if note:
+                print(note)
         if not keep:
             shutil.rmtree(work)
         return 0
@@ -260,7 +286,9 @@ def main():
     parser.add_argument("--objdump", help="llvm-objdump for disassembly (default: auto-detect)")
     parser.add_argument("--work-dir", help="keep the logs in this directory (default: a temporary "
                                            "directory, deleted when the models match)")
-    parser.add_argument("--max-cycles", type=int, help="passed to both simulators")
+    parser.add_argument("--max-cycles", type=int,
+                        help="the RTL's cycle budget (default 100000000); the ISS is stopped after as many "
+                             "instructions as the RTL retired if the RTL runs out")
     parser.add_argument("--timeout", type=float, default=600, help="seconds per simulator (default 600)")
     parser.add_argument("--context", type=int, default=5, help="matching lines shown before a mismatch")
     parser.add_argument("--expect-exit", type=int, help="also fail unless both models exit with this code")
