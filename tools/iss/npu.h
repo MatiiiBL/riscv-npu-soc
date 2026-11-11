@@ -58,6 +58,9 @@ private:
     // ARR x ARR INT32 accumulators, kept as uint32_t for wrapping arithmetic.
     // They persist between operations so ACC_KEEP can extend a previous sum.
     std::vector<uint32_t> acc_;
+
+    // The bias vector of the current write-back, read before any C write.
+    std::vector<uint32_t> bias_;
 };
 
 }  // namespace iss

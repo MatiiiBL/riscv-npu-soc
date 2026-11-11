@@ -33,7 +33,7 @@ int32_t int8_at(const Memory& mem, uint32_t addr) {
 }  // namespace
 
 Npu::Npu(Memory& mem, unsigned arr, unsigned kmax)
-    : mem_(mem), arr_(arr), kmax_(kmax), acc_(size_t{arr} * arr, 0) {}
+    : mem_(mem), arr_(arr), kmax_(kmax), acc_(size_t{arr} * arr, 0), bias_(arr, 0) {}
 
 uint32_t Npu::read(uint32_t offset) const {
     switch (offset) {
@@ -124,13 +124,16 @@ void Npu::write_back() {
     const bool relu = (quant_ & NPU_QUANT_RELU) != 0;
     const int64_t qmult = as_signed(sext(qmult_, 16));
 
+    // The whole bias vector is read before the first C write, so a C that
+    // overlaps it does not change the bias of later elements (spec 5.1).
+    for (uint32_t n = 0; n < n_; n++) {
+        bias_[n] = bias_addr_ != 0 ? mem_.read32(bias_addr_ + 4 * n) : 0;
+    }
+
     for (uint32_t m = 0; m < m_; m++) {
         const uint32_t c_row = c_addr_ + m * c_stride_;
         for (uint32_t n = 0; n < n_; n++) {
-            uint32_t v = acc_[m * arr_ + n];
-            if (bias_addr_ != 0) {
-                v += mem_.read32(bias_addr_ + 4 * n);
-            }
+            uint32_t v = acc_[m * arr_ + n] + bias_[n];
             if (out_int8) {
                 // |v * qmult| < 2^46, so the product and the rounding term
                 // fit easily in 64 bits.

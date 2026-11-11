@@ -159,6 +159,24 @@ TEST(npu_int32_bias_and_relu) {
     CHECK_EQ(t.c32(kC + 12), 0);
 }
 
+TEST(npu_bias_is_read_before_any_c_write) {
+    Bench t;
+    // C row 0 is written over the bias vector. The bias is read once before
+    // write-back, so row 1 still adds the original {100, 200}, not the 101
+    // and 201 that row 0 just stored there.
+    //   acc = [[1, 1], [2, 2]]  ->  C = [[101, 201], [102, 202]]
+    t.put8(kA, {1, 0, 0, 0, 2, 0, 0, 0});
+    t.put8(kB, {1, 0, 0, 0, 1, 0, 0, 0});
+    t.put32(kC, {100, 200, 0, 0});
+    t.shape(2, 2, 4, 8);
+    t.set(NPU_BIAS_ADDR, kC);
+    CHECK_EQ(t.start(), kDone);
+    CHECK_EQ(t.c32(kC + 0), 101);
+    CHECK_EQ(t.c32(kC + 4), 201);
+    CHECK_EQ(t.c32(kC + 8), 102);
+    CHECK_EQ(t.c32(kC + 12), 202);
+}
+
 TEST(npu_int32_wraps) {
     Bench t;
     // acc = 1, bias = INT_MAX: the sum wraps to INT_MIN.
