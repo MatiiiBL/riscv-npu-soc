@@ -7,10 +7,10 @@ has to slip past more than one independent check to reach the board:
 |-------|-----------|-----------------|----------|---------|
 | ISA compliance | riscv-tests `rv32ui` + `rv32um` (48 tests) | self-checking tests | `verif/riscv-tests/` | `make test-isa` |
 | Core, directed | short pipeline-hazard programs | their own constants, the ISS through difftest, `--stats` counters, the cycle costs of spec section 6 | `verif/core/` | `make test-core` |
-| Simulator variants | both predictor builds, random initial state, the real serial UART | each other, and the riscv-tests and firmware checks | `verif/core/` | `make test-variants` |
+| Simulator variants | both predictor builds, random initial state, the real serial UART, 4- and 8-byte NPU DMA ports | each other, and the riscv-tests and firmware checks | `verif/core/` | `make test-variants` |
 | Core, random | constrained-random RV32IM programs | ISS, commit log line by line | `verif/random/`, `tools/rvgen/`, `tools/difftest.py` | `make test-random` |
 | NPU unit | cocotb tests of `npu_top` | Python golden model | `verif/npu/` | `make test-npu` |
-| Firmware | C tests, including NPU driver tests | `expected.txt`, on both simulators; the NPU tests also on the ISS with other array sizes, by their own software reference | `sw/tests/` | `make test-sw` |
+| Firmware | C tests, including NPU driver tests | `expected.txt`, on both simulators; the NPU tests also on the ISS for ARR 1 to 8 crossed with six KMAX values (`make -C sw npu-sweep`), by their own software reference | `sw/tests/` | `make test-sw` |
 | Reference model | ISS decode/execute and NPU model | hand-computed values | `tools/iss/test/` | `make test-iss` |
 | RTL hygiene | Verilator lint | `-Wall` clean | `rtl/` | `make lint` |
 
@@ -125,6 +125,9 @@ differ from the default one:
 - `uart-serial`: a build with the real UART (`SIM = 0`) must deliver every
   firmware test's output intact over the serial line, and `hello` must have
   found the transmitter busy, so the backpressure path is exercised.
+- the firmware tests on `soc_sim_dma4` and `soc_sim_dma8`, whose NPU DMA
+  port moves 4 or 8 bytes per access instead of 16 (DMEM in 1 or 2 banks
+  instead of 4), so the NPU reads its operands in more, smaller blocks.
 
 ## 4. Random differential testing
 
@@ -351,9 +354,9 @@ mini libc, the NPU driver). Firmware that does neither can also go through
 
 | Job | Runs |
 |-----|------|
-| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make test-iss`, `make test-isa-iss`, a check that the riscv-tests refuse to run without their submodule, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`, the NPU tests also with other array sizes), 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
+| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make test-iss`, `make test-isa-iss`, a check that the riscv-tests refuse to run without their submodule, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`, the NPU tests also with other array sizes), `make -C sw npu-sweep`, 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
 | `NPU (lint, cocotb)` | `make lint` for every RTL top, `make test-npu` |
-| `RTL (<test>)` | one job each, in parallel: `make test-isa-rtl`, the riscv-tests on `soc_sim_bp0`, `make test-core`, `bp-compare`, `randreset`, `uart-serial`, `make test-sw`, the firmware tests on `soc_sim_dma4`, `make test-random`, and the random difftest on `soc_sim_bp0` |
+| `RTL (<test>)` | one job each, in parallel: `make test-isa-rtl`, the riscv-tests on `soc_sim_bp0`, `make test-core`, `bp-compare`, `randreset`, `uart-serial`, `make test-sw`, the firmware tests on `soc_sim_dma4` and on `soc_sim_dma8`, `make test-random`, and the random difftest on `soc_sim_bp0` |
 | `Synthesis (Yosys, ECP5)` | `synth_ecp5` of `npu_top` and `soc_top` with the cell counts in the job summary, then the ULX3S place and route, timing report and bitstream |
 
 The firmware toolchain is Ubuntu's `clang`, `lld` and `llvm` (clang 18 has

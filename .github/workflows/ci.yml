@@ -50,6 +50,10 @@ jobs:
       # Includes the NPU tests with other array sizes (sw/Makefile NPU_ARRS).
       - name: Firmware tests on the ISS
         run: make -j"$(nproc)" -C sw test SIMS=build/iss/iss
+      # A few seconds once the ISS and firmware are built, so it shares this
+      # job instead of setting up its own.
+      - name: NPU tests on the ISS, ARR 1-8 x six KMAX values
+        run: make -C sw npu-sweep
       - name: Random difftest, ISS against itself
         run: make -C verif/random -j"$(nproc)" SEEDS=100 LEN=2000 RTL_SIM=build/iss/iss
       - name: difftest self-test
@@ -116,6 +120,10 @@ jobs:
             run: |
               make -j"$(nproc)" -C sim NPU_DMA_BYTES=4
               make -j"$(nproc)" -C sw test SIMS=build/sim/soc_sim_dma4
+          - name: firmware, NPU_DMA_BYTES=8
+            run: |
+              make -j"$(nproc)" -C sim NPU_DMA_BYTES=8
+              make -j"$(nproc)" -C sw test SIMS=build/sim/soc_sim_dma8
           - name: random difftest
             run: make -j"$(nproc)" test-random
           - name: random difftest, BP_MODE=0

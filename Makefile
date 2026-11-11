@@ -46,15 +46,22 @@ test-core:
 
 # Simulator variants that must not change behavior: the two predictor builds
 # give identical commit logs, a build that starts from random state passes the
-# suites, and the real serial UART delivers the firmware output intact.
-test-variants:
+# suites, the real serial UART delivers the firmware output intact, and the
+# firmware tests pass with the narrower NPU DMA ports.
+NPU_DMA_VARIANTS ?= 4 8
+test-variants: sw
 	$(MAKE) -C verif/core bp-compare randreset uart-serial
+	@for b in $(NPU_DMA_VARIANTS); do \
+	  $(MAKE) -C sim NPU_DMA_BYTES=$$b && \
+	  $(MAKE) -C sw test SIMS=build/sim/soc_sim_dma$$b || exit 1; \
+	done
 
 test-npu:
 	$(MAKE) -C verif/npu
 
 test-sw: sim iss sw
 	$(MAKE) -C sw test
+	$(MAKE) -C sw npu-sweep
 
 test-random: sim iss
 	$(MAKE) -C verif/random
