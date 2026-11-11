@@ -268,3 +268,24 @@ it byte for byte. This covers what the commit-log comparison cannot: programs
 that poll the NPU or read `cycle`, and the full firmware stack (crt0, the
 mini libc, the NPU driver). Firmware that does neither can also go through
 `difftest.py` directly for an instruction-level comparison.
+
+## 7. Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request, on Ubuntu
+24.04, using the same make targets as a local checkout:
+
+| Job | Runs |
+|-----|------|
+| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make -C tools/iss test`, `make test-isa-iss`, 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
+| `NPU (lint, cocotb)` | `make lint` for every RTL top in the tree, `make test-npu` |
+| `RTL (<test>)` | `make test-isa-rtl`, `make -C verif/core`, `make test-sw` and `make test-random` against the Verilator SoC model; each is skipped with a notice while the files it needs (`sim/Makefile`, `verif/core/Makefile`) are absent |
+| `Synthesis (Yosys, ECP5)` | `synth_ecp5` of `npu_top` (and of `soc_top` through `make -C rtl synth-check` once `rtl/soc/soc.f` exists), with the cell counts in the job summary |
+
+The firmware toolchain is Ubuntu's `clang`, `lld` and `llvm` (clang 18 has
+the RISC-V target, and `mk/toolchain.mk` uses the plain tool names when there
+is no Homebrew LLVM). Verilator and Yosys come from a pinned YosysHQ OSS CAD
+Suite release, because Ubuntu's Verilator is older than the 5.036 that cocotb
+2.1 needs. The Python venv is cached on `requirements.txt`. A failing job
+uploads its failing cases (`build/random/fail/`, test logs) as an artifact.
+Each job installs only what it needs through `.github/actions/setup`, so a new
+job is a checkout, one setup step with the tools it needs, and its make target.
