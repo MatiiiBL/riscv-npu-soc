@@ -7,14 +7,16 @@
 //   soc_top.leds     --> led[7:0]
 //
 // The firmware is in the bitstream: IMEM_INIT and DMEM_INIT are the
-// $readmemh images that tools/elf2hex.py makes from an ELF, so the block RAMs
-// hold the program when configuration ends and the core starts from reset
-// at PC 0. Port names are those of the board's official constraint file
+// $readmemh images that tools/elf2hex.py makes from an ELF (IMEM_INIT a
+// file, DMEM_INIT the path prefix of the NPU_DMA_BYTES / 4 DMEM bank
+// images), so the block RAMs hold the program when configuration ends and
+// the core starts from reset at PC 0. Port names are those of the board's official constraint file
 // (ulx3s_v20.lpf), except btn_fire1, which is btn[1] there.
 module ulx3s_top #(
-  parameter int CLK_MHZ   = 25,   // core clock: 25, or a PLL setting below
-  parameter     IMEM_INIT = "",
-  parameter     DMEM_INIT = ""
+  parameter int CLK_MHZ       = 25,   // core clock: 25, or a PLL setting below
+  parameter int NPU_DMA_BYTES = 16,   // NPU DMA port width: 4, 8 or 16 bytes
+  parameter     IMEM_INIT     = "",
+  parameter     DMEM_INIT     = ""
 ) (
   input  logic       clk_25mhz,
   input  logic       btn_fire1,    // F1 button, high while pressed
@@ -124,10 +126,11 @@ module ulx3s_top #(
   localparam int UART_DIV = (CLK_HZ + BAUD / 2) / BAUD;   // rounded
 
   soc_top #(
-    .UART_DIV  (UART_DIV),
-    .SIM       (1'b0),
-    .IMEM_INIT (IMEM_INIT),
-    .DMEM_INIT (DMEM_INIT)
+    .UART_DIV      (UART_DIV),
+    .SIM           (1'b0),
+    .NPU_DMA_BYTES (NPU_DMA_BYTES),
+    .IMEM_INIT     (IMEM_INIT),
+    .DMEM_INIT     (DMEM_INIT)
   ) u_soc (
     .clk             (clk),
     .rst_n           (rst_n),

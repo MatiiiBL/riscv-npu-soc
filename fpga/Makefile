@@ -13,6 +13,8 @@
 # FW names a program in sw/tests/ or sw/bench/ (default hello); its ELF is
 # built by sw/ and becomes the block RAM contents of the bitstream. Every
 # step writes to build/fpga/<FW>/, so builds of different programs coexist.
+# CLK_MHZ (25, or a PLL setting of ulx3s_top) and NPU_DMA_BYTES (4, 8 or 16)
+# are passed to the board top.
 #
 # Tools are taken from PATH, or from $(OSS_CAD_SUITE)/bin when OSS_CAD_SUITE
 # names an unpacked YosysHQ OSS CAD Suite; each can also be set on its own
@@ -27,10 +29,11 @@ OPENFPGALOADER ?= $(TOOL_PREFIX)openFPGALoader
 
 include ../mk/toolchain.mk
 
-FW       ?= hello
-CLK_MHZ  ?= 25
-SEED     ?= 1
-SEEDS    ?= 1 2 3 4 5 6 7 8
+FW            ?= hello
+CLK_MHZ       ?= 25
+NPU_DMA_BYTES ?= 16
+SEED          ?= 1
+SEEDS         ?= 1 2 3 4 5 6 7 8
 
 SYNTH_FLAGS   ?=
 NEXTPNR_FLAGS ?=
@@ -62,7 +65,7 @@ FW_DIR = $(firstword $(patsubst $(REPO_ROOT)/sw/%/Makefile,%,\
 .PHONY: all synth report seeds lint prog clean FORCE
 all: $(BIT)
 
-RUN_LABEL = FW=$(FW), CLK_MHZ=$(CLK_MHZ), seed $(SEED)
+RUN_LABEL = FW=$(FW), CLK_MHZ=$(CLK_MHZ), NPU_DMA_BYTES=$(NPU_DMA_BYTES), seed $(SEED)
 
 synth: $(REPORT)
 	@$(PYTHON) report.py --label "$(RUN_LABEL)" $(REPORT)
@@ -78,7 +81,7 @@ define settings
 endef
 
 $(FW_OUT)/synth.settings: FORCE
-	$(call settings,CLK_MHZ=$(CLK_MHZ) $(SYNTH_FLAGS))
+	$(call settings,CLK_MHZ=$(CLK_MHZ) NPU_DMA_BYTES=$(NPU_DMA_BYTES) $(SYNTH_FLAGS))
 
 $(FW_OUT)/pnr.settings: FORCE
 	$(call settings,CLK_MHZ=$(CLK_MHZ) SEED=$(SEED) $(NEXTPNR_FLAGS))
@@ -89,15 +92,18 @@ $(ELF): FORCE
 	@test -n "$(FW_DIR)" || { echo "fpga: no program '$(FW)' in sw/tests or sw/bench" >&2; exit 1; }
 	$(MAKE) -C $(REPO_ROOT)/sw $(FW_DIR)
 
-# One rule writes both images (a pattern rule with two targets runs once).
-$(OUT)/%/imem.hex $(OUT)/%/dmem.hex: $(BUILD_DIR)/sw/%.elf
+# One rule writes all images (a pattern rule with several targets runs
+# once): imem.hex, and one dmem<b>.hex per DMEM bank (NPU_DMA_BYTES / 4
+# word-interleaved banks), which soc_top loads from the prefix DMEM_INIT.
+$(OUT)/%/imem.hex $(OUT)/%/dmem0.hex: $(BUILD_DIR)/sw/%.elf $(OUT)/%/synth.settings
 	@mkdir -p $(@D)
-	$(PYTHON) $(REPO_ROOT)/tools/elf2hex.py $< --imem $(@D)/imem.hex --dmem $(@D)/dmem.hex
+	$(PYTHON) $(REPO_ROOT)/tools/elf2hex.py $< --imem $(@D)/imem.hex \
+	  --dmem $(@D)/dmem --dmem-banks $$(( $(NPU_DMA_BYTES) / 4 ))
 
-$(NETLIST): $(SOURCES) $(FW_OUT)/imem.hex $(FW_OUT)/dmem.hex $(FW_OUT)/synth.settings
+$(NETLIST): $(SOURCES) $(FW_OUT)/imem.hex $(FW_OUT)/dmem0.hex $(FW_OUT)/synth.settings
 	$(YOSYS) -q -l $(FW_OUT)/yosys.log -p "read_verilog -sv $(SOURCES); \
-	  chparam -set CLK_MHZ $(CLK_MHZ) -set IMEM_INIT \"$(FW_OUT)/imem.hex\" \
-	    -set DMEM_INIT \"$(FW_OUT)/dmem.hex\" ulx3s_top; \
+	  chparam -set CLK_MHZ $(CLK_MHZ) -set NPU_DMA_BYTES $(NPU_DMA_BYTES) \
+	    -set IMEM_INIT \"$(FW_OUT)/imem.hex\" -set DMEM_INIT \"$(FW_OUT)/dmem\" ulx3s_top; \
 	  synth_ecp5 $(SYNTH_FLAGS) -top ulx3s_top -json $@; \
 	  tee -q -o $(FW_OUT)/stat.txt stat"
 
@@ -121,7 +127,7 @@ $(BIT): $(CONFIG)
 SEED_REPORTS := $(foreach s,$(SEEDS),$(FW_OUT)/seed$(s)/report.json)
 
 seeds: $(SEED_REPORTS)
-	@$(PYTHON) report.py --label "FW=$(FW), CLK_MHZ=$(CLK_MHZ)" \
+	@$(PYTHON) report.py --label "FW=$(FW), CLK_MHZ=$(CLK_MHZ), NPU_DMA_BYTES=$(NPU_DMA_BYTES)" \
 	  --seeds $(foreach s,$(SEEDS),$(s)=$(FW_OUT)/seed$(s)/report.json)
 
 $(FW_OUT)/seed%/report.json: $(NETLIST) $(LPF)
