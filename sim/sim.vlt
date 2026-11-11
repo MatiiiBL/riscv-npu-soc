@@ -1,7 +1,8 @@
 `verilator_config
 
-// The harness writes the program image straight into the memory arrays, so
-// they must stay visible (and writable) from C++ after Verilator flattens the
-// design.
+// The harness writes the program image straight into the memory arrays, and
+// zeroes the register file, so these must stay visible (and writable) from
+// C++ after Verilator flattens the design.
 public_flat_rw -module "bram_sp" -var "mem"
 public_flat_rw -module "bram_tdp" -var "mem"
+public_flat_rw -module "rv32_regfile" -var "regs"

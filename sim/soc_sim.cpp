@@ -7,6 +7,7 @@
 // MMIO write strobes (MEM), because the WB instruction is the older of the
 // two: once the SIM_EXIT store retires, a younger store already in MEM must
 // not reach stdout.
+#include <algorithm>
 #include <cerrno>
 #include <cinttypes>
 #include <cstdio>
@@ -144,6 +145,11 @@ bool load_program(Vsoc_top &top, const char *path) {
     }
     for (size_t i = 0; i < DMEM_SIZE / 4; i++) {
         root->soc_top__DOT__u_dmem__DOT__mem[i] = word(dmem, i);
+    }
+    // The ISS starts with every register at zero; do not leave that to the
+    // simulator's choice of initial values for the (unreset) register file.
+    for (size_t i = 0; i < 32; i++) {
+        root->soc_top__DOT__u_core__DOT__u_regfile__DOT__regs[i] = 0;
     }
     return true;
 }
