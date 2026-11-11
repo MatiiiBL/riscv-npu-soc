@@ -21,6 +21,14 @@ static inline __attribute__((noreturn)) void sim_exit(uint32_t code) {
     }
 }
 
+/*
+ * Exit code of a test that does not support the configuration it runs on
+ * (an NPU size given to the ISS with --npu-arr / --npu-kmax, say). It says
+ * why on the UART first. 77 is the usual "skipped" code of test harnesses;
+ * make -C sw npu-sweep counts it as a skip, every other target as a failure.
+ */
+#define EXIT_SKIP 77
+
 static inline uint32_t rdcycle(void) {
     uint32_t v;
     __asm__ volatile("rdcycle %0" : "=r"(v));

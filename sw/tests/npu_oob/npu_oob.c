@@ -71,6 +71,11 @@ static void check(const char *what, int rc, const volatile int32_t *got, const i
 
 int main(void) {
     printf("npu_oob: NPU DMA outside DMEM\n");
+    npu_info_t info = npu_info();
+    if (info.arr < 2 || info.kmax < 8) {
+        printf("unsupported NPU size: this test needs ARR >= 2 and KMAX >= 8\nSKIP\n");
+        return EXIT_SKIP;
+    }
     if (addr(_stack_top) > DMEM_END - TOP_BYTES) {
         printf("the stack overlaps the end of DMEM (STACK_TOP not set)\nFAIL\n");
         return 1;

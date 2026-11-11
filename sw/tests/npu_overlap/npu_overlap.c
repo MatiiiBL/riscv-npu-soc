@@ -33,6 +33,11 @@ static void check(const char *what, int rc, const int32_t *got, const int32_t *w
 
 int main(void) {
     printf("npu_overlap: C overlapping the bias, itself and A\n");
+    npu_info_t info = npu_info();
+    if (info.arr < 2 || info.kmax < 4) {
+        printf("unsupported NPU size: this test needs ARR >= 2 and KMAX >= 4\nSKIP\n");
+        return EXIT_SKIP;
+    }
     static const int8_t a[2][4] __attribute__((aligned(4))) = {{1, 0, 0, 0}, {2, 0, 0, 0}};
     static const int8_t b_ones[2][4] __attribute__((aligned(4))) = {{1, 0, 0, 0}, {1, 0, 0, 0}};
     static const int8_t b[2][4] __attribute__((aligned(4))) = {{1, 0, 0, 0}, {10, 0, 0, 0}};

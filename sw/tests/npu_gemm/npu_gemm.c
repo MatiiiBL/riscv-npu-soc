@@ -21,10 +21,12 @@
  *   7. tiled GEMM         random M x N x K beyond one tile (npu_gemm)
  *   8. linear layer       npu_linear vs sw_linear
  *
- * Everything adapts to ARR and KMAX from the INFO register, so the test also
- * passes on the ISS with any --npu-arr from 2 to 16. On arrays narrower than
- * 4, npu_gemm() must refuse INT8 output wider than one tile (NPU_UNSUPPORTED)
- * without writing anything; sections 7 and 8 check that instead.
+ * Everything adapts to ARR and KMAX from the INFO register, so the test runs
+ * on the ISS with any --npu-arr from 1 to 16 and --npu-kmax from 4 to 1024
+ * (section 4 needs word-aligned K chunks no longer than KMAX); it skips
+ * other sizes with EXIT_SKIP. On arrays narrower than 4, npu_gemm() must
+ * refuse INT8 output wider than one tile (NPU_UNSUPPORTED) without writing
+ * anything; sections 7 and 8 check that instead.
  */
 #include "npu.h"
 #include "rng.h"
@@ -49,6 +51,10 @@ static rng_t rng = {0x0DDBA11u};
 
 static uint32_t align4(uint32_t v) {
     return (v + 3u) & ~3u;
+}
+
+static uint32_t min_u32(uint32_t a, uint32_t b) {
+    return a < b ? a : b;
 }
 
 static uint32_t c_elem(uint32_t quant) {
@@ -222,7 +228,8 @@ static const scalar_case_t scalar_cases[] = {
 static int known_answers(void) {
     uint32_t failed = 0, cases = 0;
 
-    /* A 2 x 2 x 4 GEMM worked by hand. */
+    /* A 2 x 2 x 4 GEMM worked by hand, through npu_gemm() so that it also
+     * runs on a 1 x 1 array (one command on any larger one). */
     static const int8_t a[2][4] __attribute__((aligned(4))) = {{1, 2, 3, 4}, {-1, -2, -3, -4}};
     static const int8_t b[2][4] __attribute__((aligned(4))) = {{1, 1, 1, 1}, {1, -1, 1, -1}};
     static const int32_t bias[2] __attribute__((aligned(4))) = {100, -100};
@@ -239,7 +246,7 @@ static int known_answers(void) {
             .m = 2, .n = 2, .k = 4, .a_stride = 4, .b_stride = 4, .c_stride = 8,
             .quant = v == 2 ? NPU_QUANT_RELU : 0u, .qmult = 1,
         };
-        int rc = npu_gemm_tile(&op, 0);
+        int rc = npu_gemm(&op);
         op.c = c_ref;
         sw_gemm(&op);
         cases++;
@@ -287,8 +294,11 @@ static int single_tiles(void) {
     for (uint32_t i = 0; i < cases; i++) {
         uint32_t m = (uint32_t)rng_range(&rng, 1, (int32_t)info.arr);
         uint32_t n = (uint32_t)rng_range(&rng, 1, (int32_t)info.arr);
-        uint32_t k = (i % 20 == 19) ? (uint32_t)rng_range(&rng, 65, (int32_t)info.kmax)
-                                   : (uint32_t)rng_range(&rng, 1, 64);
+        /* K up to 64, and every 20th case above it (where KMAX allows). */
+        int long_k = i % 20 == 19;
+        uint32_t k_lo = long_k && info.kmax > 64 ? 65 : 1;
+        uint32_t k_hi = long_k ? info.kmax : min_u32(64, info.kmax);
+        uint32_t k = (uint32_t)rng_range(&rng, (int32_t)k_lo, (int32_t)k_hi);
         gemm_op_t op = random_op(m, n, k, 0, (int)(rng_next(&rng) & 1u));
         random_quant(&op);
         failed += compare("single tile", &op, 0, 0);
@@ -299,8 +309,8 @@ static int single_tiles(void) {
 static int edge_shapes(void) {
     const uint32_t A = info.arr, K = info.kmax;
     const uint32_t shapes[][3] = {
-        {1, 1, 1}, {A, A, 1}, {1, 1, K}, {A, A, K}, {A, 1, 3}, {1, A, 5}, {A, A, 4},
-        {A - 1, A / 2 + 1, K - 1},
+        {1, 1, 1}, {A, A, 1}, {1, 1, K}, {A, A, K}, {A, 1, 3}, {1, A, min_u32(5, K)}, {A, A, 4},
+        {A > 1 ? A - 1 : 1, A / 2 + 1, K - 1},
     };
     uint32_t failed = 0, cases = 0;
     for (size_t s = 0; s < sizeof shapes / sizeof shapes[0]; s++) {
@@ -327,57 +337,82 @@ static gemm_op_t k_slice(const gemm_op_t *op, uint32_t k0, uint32_t k1) {
     return s;
 }
 
+/*
+ * Runs op on the NPU as a K split: a first chunk of `first` columns, then
+ * chunks of `rest`. Every chunk but the last skips write-back and every
+ * chunk but the first keeps the sums. With bad_after_first, an invalid
+ * command (M = 0) follows the first chunk; it must be rejected and leave
+ * the sums alone. 1 if every command did what it should.
+ */
+static int run_split(const gemm_op_t *op, uint32_t first, uint32_t rest, int bad_after_first) {
+    int ok = 1;
+    for (uint32_t k0 = 0; k0 < op->k;) {
+        uint32_t len = min_u32(k0 == 0 ? first : rest, op->k - k0);
+        gemm_op_t part = k_slice(op, k0, k0 + len);
+        uint32_t ctrl = (k0 > 0 ? NPU_CTRL_ACC_KEEP : 0u) | (k0 + len < op->k ? NPU_CTRL_NO_WB : 0u);
+        ok &= npu_gemm_tile(&part, ctrl) == NPU_OK;
+        if (k0 == 0 && bad_after_first) {
+            gemm_op_t bad = part;
+            bad.m = 0;
+            ok &= npu_gemm_tile(&bad, NPU_CTRL_ACC_KEEP) == NPU_ERROR;
+        }
+        k0 += len;
+    }
+    return ok;
+}
+
 static int accumulate_flags(void) {
     uint32_t failed = 0, cases = 0;
     const uint32_t A = info.arr;
-
-    /* NO_WB writes nothing. */
+    /* K = 40 in chunks that are multiples of 4 (so every chunk of an A or B
+     * row starts on a word boundary) and at most KMAX: 16 + 24 and
+     * 8 + 20 + 12 with the default KMAX, more chunks on a small one. */
+    const uint32_t chunk = info.kmax & ~3u;
+    const uint32_t splits[2][2] = {{min_u32(16, chunk), min_u32(24, chunk)},
+                                   {min_u32(8, chunk), min_u32(20, chunk)}};
     gemm_op_t op = random_op(A, A, 40, NPU_QUANT_OUT_INT8 | NPU_QUANT_SHIFT(9), 1);
     op.qmult = 77;
+
+    /* NO_WB writes nothing. */
+    gemm_op_t head = k_slice(&op, 0, splits[0][0]);
     fill_canary(C_BYTES);
     cases++;
-    if (npu_gemm_tile(&op, NPU_CTRL_NO_WB) != NPU_OK || !all_canary(c_npu, C_BYTES)) {
+    if (npu_gemm_tile(&head, NPU_CTRL_NO_WB) != NPU_OK || !all_canary(c_npu, C_BYTES)) {
         printf("  NO_WB wrote to C\n");
         failed++;
     }
 
-    /* Two- and three-way K splits must equal the single command (the bias is
-     * applied once, by the final write-back). Word-aligned split points keep
-     * A and B legal. */
-    gemm_op_t split2[2] = {k_slice(&op, 0, 16), k_slice(&op, 16, 40)};
-    gemm_op_t split3[3] = {k_slice(&op, 0, 8), k_slice(&op, 8, 28), k_slice(&op, 28, 40)};
-    const uint32_t ctrl2[2] = {NPU_CTRL_NO_WB, NPU_CTRL_ACC_KEEP};
-    const uint32_t ctrl3[3] = {NPU_CTRL_NO_WB, NPU_CTRL_ACC_KEEP | NPU_CTRL_NO_WB, NPU_CTRL_ACC_KEEP};
-    for (int ways = 2; ways <= 3; ways++) {
+    /* A split must equal the whole product (the bias is applied once, by the
+     * final write-back), also with a rejected command in the middle. */
+    for (int s = 0; s < 3; s++) {
         fill_canary(c_span(&op));
         gemm_op_t ref = op;
         ref.c = c_sw;
         sw_gemm(&ref);
-        int rc = NPU_OK;
-        for (int i = 0; i < ways; i++) {
-            rc |= npu_gemm_tile(ways == 2 ? &split2[i] : &split3[i], ways == 2 ? ctrl2[i] : ctrl3[i]);
-        }
+        const uint32_t *split = splits[s == 1];
         cases++;
-        failed += rc != NPU_OK || report_mismatch(ways == 2 ? "2-way K split" : "3-way K split", &op);
+        failed += !run_split(&op, split[0], split[1], s == 2) ||
+                  report_mismatch(s == 2 ? "ERR inside a K split" : "K split", &op);
     }
 
     /* ACC_KEEP after a normal command continues from its sums: running the
      * same command twice equals one command over [A A] x [B B]. */
-    gemm_op_t base = random_op(A, A, 24, 0, 1);
+    const uint32_t kb = min_u32(24, info.kmax);
+    gemm_op_t base = random_op(A, A, kb, 0, 1);
     static int8_t a2[MAX_ARR * 48] __attribute__((aligned(4)));
     static int8_t b2[MAX_ARR * 48] __attribute__((aligned(4)));
     for (uint32_t r = 0; r < A; r++) {
-        memcpy(&a2[r * 48], base.a + r * base.a_stride, 24);
-        memcpy(&a2[r * 48 + 24], base.a + r * base.a_stride, 24);
-        memcpy(&b2[r * 48], base.b + r * base.b_stride, 24);
-        memcpy(&b2[r * 48 + 24], base.b + r * base.b_stride, 24);
+        memcpy(&a2[r * 2 * kb], base.a + r * base.a_stride, kb);
+        memcpy(&a2[r * 2 * kb + kb], base.a + r * base.a_stride, kb);
+        memcpy(&b2[r * 2 * kb], base.b + r * base.b_stride, kb);
+        memcpy(&b2[r * 2 * kb + kb], base.b + r * base.b_stride, kb);
     }
     fill_canary(c_span(&base));
     gemm_op_t twice = base;
     twice.a = a2;
     twice.b = b2;
-    twice.k = 48;
-    twice.a_stride = twice.b_stride = 48;
+    twice.k = 2 * kb;
+    twice.a_stride = twice.b_stride = 2 * kb;
     twice.c = c_sw;
     sw_gemm(&twice);
     int rc = npu_gemm_tile(&base, 0);
@@ -385,19 +420,6 @@ static int accumulate_flags(void) {
     rc |= npu_gemm_tile(&base, NPU_CTRL_ACC_KEEP);
     cases++;
     failed += rc != NPU_OK || report_mismatch("ACC_KEEP after write-back", &base);
-
-    /* A rejected command does not touch the accumulators. */
-    fill_canary(c_span(&op));
-    gemm_op_t ref = op;
-    ref.c = c_sw;
-    sw_gemm(&ref);
-    gemm_op_t bad = split2[0];
-    bad.m = 0;
-    rc = npu_gemm_tile(&split2[0], NPU_CTRL_NO_WB);
-    int bad_rc = npu_gemm_tile(&bad, NPU_CTRL_ACC_KEEP);
-    rc |= npu_gemm_tile(&split2[1], NPU_CTRL_ACC_KEEP);
-    cases++;
-    failed += rc != NPU_OK || bad_rc != NPU_ERROR || report_mismatch("ERR inside a K split", &op);
 
     return section("NO_WB / ACC_KEEP", cases, failed);
 }
@@ -408,14 +430,17 @@ static int accumulate_flags(void) {
  * Every command asks to keep both operands. The first loads; the second
  * repeats it exactly (the NPU may skip both loads); each later one changes
  * one thing the NPU compares (an address, a stride, a row count, K) from
- * the command before it, so that operand must be reloaded. The buffers hold
- * random data throughout, so a stale operand gives a wrong result.
+ * the command before it, so that operand must be reloaded (on a 1 x 1 array
+ * there is no other M or N, so those two steps repeat the command). The
+ * buffers hold random data throughout, so a stale operand gives a wrong
+ * result.
  */
 static int operand_reuse(void) {
     const uint32_t A = info.arr;
+    const uint32_t K = min_u32(40, info.kmax);
     const uint32_t keep = NPU_CTRL_A_KEEP | NPU_CTRL_B_KEEP;
     gemm_op_t seq[9];
-    seq[0] = random_op(A, A, 40, 0, 1);
+    seq[0] = random_op(A, A, K, 0, 1);
     rng_fill_i8(&rng, a_buf, sizeof a_buf);
     rng_fill_i8(&rng, b_buf, sizeof b_buf);
     seq[1] = seq[0];
@@ -428,11 +453,11 @@ static int operand_reuse(void) {
     seq[5] = seq[4];
     seq[5].b_stride += 8;
     seq[6] = seq[5];
-    seq[6].m = A / 2;
+    seq[6].m = A > 1 ? A / 2 : 1;
     seq[7] = seq[6];
-    seq[7].n = A - 1;
+    seq[7].n = A > 1 ? A - 1 : 1;
     seq[8] = seq[7];
-    seq[8].k = 44;
+    seq[8].k = K + 4 <= info.kmax ? K + 4 : K - 1;
     uint32_t failed = 0;
     const uint32_t cases = sizeof seq / sizeof seq[0];
     for (uint32_t i = 0; i < cases; i++) {
@@ -445,7 +470,7 @@ static int operand_reuse(void) {
 
 static int errors(void) {
     /* A valid command on any array, so only the one change makes it bad. */
-    gemm_op_t good = random_op(info.arr - 1, info.arr, 12, 0, 1);
+    gemm_op_t good = random_op(info.arr > 1 ? info.arr - 1 : 1, info.arr, min_u32(12, info.kmax), 0, 1);
     uint32_t failed = 0, cases = 0;
     for (int e = 0; e < 13; e++) {
         gemm_op_t op = good;
@@ -527,10 +552,14 @@ int main(void) {
     printf("npu_gemm: NPU vs software reference\n");
     info = npu_info();
     printf("NPU: ARR=%u KMAX=%u version=%u\n", info.arr, info.kmax, info.version);
-    if (info.version != 1 || info.arr < 2 || info.arr > MAX_ARR || info.kmax < 64 ||
-        info.kmax > MAX_K) {
+    if (info.version != 1 || info.arr == 0 || info.kmax == 0) {
         printf("unexpected INFO register\nFAIL\n");
         return 1;
+    }
+    if (info.arr > MAX_ARR || info.kmax < 4 || info.kmax > MAX_K) {
+        printf("unsupported NPU size: this test needs ARR 1..%u and KMAX 4..%u\nSKIP\n", MAX_ARR,
+               MAX_K);
+        return EXIT_SKIP;
     }
 
     int failures = 0;
