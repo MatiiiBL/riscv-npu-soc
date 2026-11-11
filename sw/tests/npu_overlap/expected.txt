@@ -1,0 +1,5 @@
+npu_overlap: C overlapping the bias, itself and A
+C over bias: 101 201 102 202 ok
+overlapping C rows: 1 2 20 77777777 ok
+C over A: 1 10 2 20 ok
+PASS

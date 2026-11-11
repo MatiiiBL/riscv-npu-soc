@@ -260,6 +260,7 @@ ARR = 8 output, so those runs are judged by the exit code.
 | `npu_ksplit` | K beyond KMAX through `npu_gemm` and by hand with uneven chunks; each line prints the number of commands the driver started (`npu_commands()`), so `expected.txt` also pins how many commands a GEMM costs |
 | `npu_oob` | NPU DMA outside DMEM reads 0 and drops writes: A in IMEM and past the end of DMEM, B and the bias straddling the end, C's second row past the end, C in the MMIO window (on `UART_TX` and `SIM_EXIT`); the out-of-range accesses sit 256 KiB above known buffers, so a DMA that wrapped the address back into DMEM is caught |
 | `npu_concurrent` | CPU word, halfword and byte loads and stores in every bank, in the DMA blocks right next to A, B, the bias and C, while 8 x 8 x 1024 INT32 and INT8 commands run (started by hand, polled afterwards): C equals `sw_gemm`, the operands are unchanged and the CPU's data equals the same workload rerun with the NPU idle. Where `CYCLES` is nonzero (RTL) it also checks that the NPU was still busy after the first slice of CPU work and done by its end |
+| `npu_overlap` | one command whose C overlaps what it reads or writes, with literal results: C written over the bias vector (the bias is read once, before any C write), C rows closer than a row apart (later elements win, in spec order), and C written over its own A |
 
 ## Benchmarks
 
