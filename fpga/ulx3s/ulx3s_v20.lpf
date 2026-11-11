@@ -1,0 +1,48 @@
+# ULX3S v2.x/v3.0.x pin constraints for ulx3s_top, trimmed to the pins the
+# design uses. Every line is copied from the board's official constraint
+# file, github.com/emard/ulx3s doc/constraints/ulx3s_v20.lpf (commit
+# ca5fa28), except that btn[1] is named btn_fire1 here.
+
+BLOCK RESETPATHS;
+BLOCK ASYNCPATHS;
+
+# 25 MHz oscillator. The core clock's constraint follows from this one
+# through the PLL settings.
+LOCATE COMP "clk_25mhz" SITE "G2";
+IOBUF  PORT "clk_25mhz" PULLMODE=NONE IO_TYPE=LVCMOS33;
+FREQUENCY PORT "clk_25mhz" 25 MHZ;
+
+# Configuration: 3.3 V banks, compressed bitstream, 62 MHz SPI clock when
+# booting from flash. nextpnr applies these three and ignores the SPI port
+# options; the design does not use those pins either way.
+SYSCONFIG CONFIG_IOVOLTAGE=3.3 COMPRESS_CONFIG=ON MCCLK_FREQ=62 SLAVE_SPI_PORT=DISABLE MASTER_SPI_PORT=ENABLE SLAVE_PARALLEL_PORT=DISABLE;
+
+# USB serial (FTDI FT231X): the FPGA transmits on the FTDI's RX pin.
+LOCATE COMP "ftdi_rxd" SITE "L4"; # FPGA transmits to ftdi
+IOBUF  PORT "ftdi_rxd" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;
+
+# LEDs D0-D7, active high.
+LOCATE COMP "led[7]" SITE "H3";
+LOCATE COMP "led[6]" SITE "E1";
+LOCATE COMP "led[5]" SITE "E2";
+LOCATE COMP "led[4]" SITE "D1";
+LOCATE COMP "led[3]" SITE "D2";
+LOCATE COMP "led[2]" SITE "C1";
+LOCATE COMP "led[1]" SITE "C2";
+LOCATE COMP "led[0]" SITE "B2";
+IOBUF  PORT "led[0]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[1]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[2]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[3]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[4]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[5]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[6]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF  PORT "led[7]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
+
+# F1 button (btn[1] in the official file), high while pressed: the reset.
+LOCATE COMP "btn_fire1" SITE "R1";  # FIRE1
+IOBUF  PORT "btn_fire1" PULLMODE=DOWN IO_TYPE=LVCMOS33 DRIVE=4;
+
+# ESP32 GPIO0, held high by the design.
+LOCATE COMP "wifi_gpio0" SITE "L2";
+IOBUF  PORT "wifi_gpio0" PULLMODE=UP IO_TYPE=LVCMOS33 DRIVE=4;

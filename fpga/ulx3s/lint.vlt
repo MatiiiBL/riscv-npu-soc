@@ -1,0 +1,13 @@
+`verilator_config
+
+// Yosys's ECP5 cell library is read only to declare EHXPLLL; it is vendor
+// Verilog-2005 with untyped ports and many modules per file.
+lint_off -file "*cells_bb.v"
+
+// The board leaves the SoC's simulation taps, retirement port and
+// performance counters, and the PLL outputs it does not use, open on purpose.
+lint_off -rule PINCONNECTEMPTY -file "*ulx3s_top.sv"
+
+// The reset generator's flip-flops are declared with their state at the end
+// of FPGA configuration; that initial state is the power-on reset.
+lint_off -rule PROCASSINIT -file "*ulx3s_top.sv"
