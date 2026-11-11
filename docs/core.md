@@ -334,8 +334,9 @@ in the cycle after the halting instruction retires; ECALL/EBREAK and
 illegal instructions are told apart by the retired instruction word.
 
 Measured on an Apple M4 laptop (one thread): 11-16 M cycles/s for a
-load/store/branch loop (variation from machine load), about 4 M cycles/s
-while writing a commit log.
+load/store/branch loop with the NPU stub (variation from machine load),
+about 7 M cycles/s on CoreMark and MNIST with the real NPU in the model,
+and about 4 M cycles/s while writing a commit log.
 
 ## 8. Verification
 
@@ -378,6 +379,8 @@ CPI (`soc_sim --stats`); cycles include the 4-cycle pipeline fill:
 
 | Program | `BP_MODE = 1` cycles / CPI | `BP_MODE = 0` cycles / CPI | Notes |
 |---------|---------------------------|----------------------------|-------|
+| `sw/bench/coremark` | 3075804 / 1.167 | 3657306 / 1.388 | 3.29 vs 2.77 CoreMark/MHz; 9.7% vs 58.8% of branches mispredicted |
+| `sw/bench/gemm` (CPU parts) | 13243977 / 1.015 | 14490115 / 1.116 | |
 | `sw/tests/hello` | 825 / 1.230 | 915 / 1.364 | 671 instructions, 98 load-use bubbles; 27 vs 72 mispredicts |
 | `verif/core/calls` | 27480 / 1.198 | 32960 / 1.437 | recursive fib(15), returns to varying call sites |
 | `verif/core/bpred` | 4091 / 1.179 | 5051 / 1.455 | loop and pattern branches |
