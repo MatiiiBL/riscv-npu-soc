@@ -1,4 +1,4 @@
-// Data memory (docs/spec.md 3 and 4.4): WORDS 32-bit words split into BANKS
+// Data memory (docs/spec.md 3 and 4.5): WORDS 32-bit words split into BANKS
 // word-interleaved banks. Word w lives in bank (w mod BANKS) at row
 // (w / BANKS), and every bank is a true dual-port block RAM with byte
 // enables (bram_tdp).
