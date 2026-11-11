@@ -46,27 +46,27 @@ TEST_BEGIN
         sub     a3, a2, a1
         CHECK(a3, 5)
 
-        CASE(3)                         /* load-use costs exactly one bubble */
+        CASE(3)                         /* load-use right behind the load: two bubbles */
         rdcycle a1
         lw      a4, 0(s0)
         addi    a5, a4, 1
         rdcycle a2
         sub     a3, a2, a1
-        CHECK(a3, 4)
+        CHECK(a3, 5)
         rdcycle a1
         lw      a4, 0(s0)
         sw      a4, 4(s0)               /* store data */
         rdcycle a2
         sub     a3, a2, a1
-        CHECK(a3, 4)
+        CHECK(a3, 5)
         rdcycle a1
         lw      a4, 0(s0)
         bne     a4, a7, fail            /* branch, not taken */
         rdcycle a2
         sub     a3, a2, a1
-        CHECK(a3, 4)
+        CHECK(a3, 5)
 
-        CASE(4)                         /* ...and nothing without a dependency */
+        CASE(4)                         /* nothing without a dependency, one bubble one apart */
         rdcycle a1
         lw      a4, 0(s0)
         addi    a5, a6, 1
@@ -79,7 +79,7 @@ TEST_BEGIN
         addi    a5, a4, 1
         rdcycle a2
         sub     a3, a2, a1
-        CHECK(a3, 4)
+        CHECK(a3, 5)
 
         CASE(5)                         /* multiply: the product is one cycle late */
         rdcycle a1

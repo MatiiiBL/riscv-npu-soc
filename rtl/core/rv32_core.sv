@@ -8,13 +8,15 @@
 //    therefore means dropping imem_req, which makes the BRAM hold its output.
 //  * Branches and jumps resolve in EX. A wrong prediction redirects IF and
 //    kills the two younger instructions in IF and ID (2 bubbles).
-//  * Operands are forwarded into EX from EX/MEM and MEM/WB; the register file
-//    is write-before-read, which covers the WB -> ID distance.
-//  * A load followed by an instruction that reads its result stalls ID once;
-//    the load data then reaches EX through the MEM/WB forward.
+//  * Operands are forwarded into EX from the EX/MEM and MEM/WB registers;
+//    the register file is write-before-read, which covers the WB -> ID
+//    distance.
+//  * Load data is never forwarded: it arrives from the block RAM late in WB,
+//    so an instruction that reads it waits in ID until the load is in WB
+//    (two bubbles right behind the load) and gets it from the register file.
 //  * MUL takes its operands in EX and multiplies in MEM, so an instruction
-//    that reads the product right away also stalls ID once. DIV/REM hold EX
-//    for 34 cycles while the iterative divider runs.
+//    that reads the product right away stalls ID once and then takes it from
+//    MEM/WB. DIV/REM hold EX for 34 cycles while the iterative divider runs.
 //  * ECALL, EBREAK and illegal instructions flush everything younger when
 //    they reach EX, retire normally from WB and then raise `halted`.
 //
@@ -223,16 +225,25 @@ module rv32_core #(
   logic [31:0]        bp_tgt_x;
   logic               tgt_ok_x;      // predicted target equals tgt_x
 
-  // The data hazards forwarding cannot cover: a load or a multiply in EX
-  // whose result the instruction in ID reads. Neither result exists before
-  // the end of MEM, so ID waits a cycle. A divide sitting in EX is neither,
-  // so these and div_stall are mutually exclusive.
-  logic is_mul_x, rd_match_x;
+  // The data hazards forwarding cannot cover, where the instruction in ID
+  // reads the result of
+  //  * a multiply in EX: the product exists only at the end of MEM, so ID
+  //    waits one cycle and then takes it from the MEM/WB forward;
+  //  * a load in EX or MEM: load data is never forwarded, because it comes
+  //    straight out of the block RAM late in WB. ID waits until the load is
+  //    in WB and reads the value through the register file's write-before-
+  //    read path instead (two bubbles right after the load, one with an
+  //    instruction in between).
+  // A divide sitting in EX is neither, so these and div_stall are mutually
+  // exclusive.
+  logic is_mul_x, rd_match_x, rd_match_m;
 
   assign is_mul_x   = (res_sel_x == rv32_pkg::RES_MUL);
   assign rd_match_x = valid_x && rd_we_x && valid_d &&
                       ((uses_rs1_d && rs1_d == rd_x) || (uses_rs2_d && rs2_d == rd_x));
-  assign lu_hazard  = rd_match_x && is_load_x;
+  assign rd_match_m = valid_m && rd_we_m && valid_d &&
+                      ((uses_rs1_d && rs1_d == rd_m) || (uses_rs2_d && rs2_d == rd_m));
+  assign lu_hazard  = (rd_match_x && is_load_x) || (rd_match_m && is_load_m);
   assign mu_hazard  = rd_match_x && is_mul_x;
   assign stall_d    = lu_hazard || mu_hazard || div_stall;
 
@@ -290,16 +301,17 @@ module rv32_core #(
   logic        cmp_eq_x, cmp_lt_x, cmp_ltu_x, cond_x;
   logic        taken_x, tgt_match_x;
 
-  // The MEM-stage result is never a load's data or a product here: the
-  // interlocks guarantee that their consumers are still in ID while the
-  // producer is in MEM.
+  // Both forwards come from pipeline registers. The interlocks guarantee
+  // that the MEM-stage result is never a load's data or a product, and that
+  // the WB-stage result is never a load's data, so res_w (not wb_data_w,
+  // which carries the load data from the block RAM) is the WB forward.
   always_comb begin
     if (valid_m && rd_we_m && rd_m == rs1_x)      fwd1_x = res_m;
-    else if (valid_w && rd_we_w && rd_w == rs1_x) fwd1_x = wb_data_w;
+    else if (valid_w && rd_we_w && rd_w == rs1_x) fwd1_x = res_w;
     else                                          fwd1_x = rs1_val_x;
 
     if (valid_m && rd_we_m && rd_m == rs2_x)      fwd2_x = res_m;
-    else if (valid_w && rd_we_w && rd_w == rs2_x) fwd2_x = wb_data_w;
+    else if (valid_w && rd_we_w && rd_w == rs2_x) fwd2_x = res_w;
     else                                          fwd2_x = rs2_val_x;
   end
 

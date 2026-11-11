@@ -318,8 +318,11 @@ while (!(REG32(NPU_STATUS) & NPU_STATUS_DONE)) { }
 - Five stages: IF, ID, EX, MEM, WB. Branches and jumps resolve in EX.
 - Register file: 32 x 32, x0 hard-wired to 0, write-before-read in the same
   cycle (or an equivalent WB to ID bypass).
-- Forwarding from EX/MEM and MEM/WB into EX. A load followed by a dependent
-  instruction costs exactly one bubble.
+- Forwarding into EX from the EX/MEM and MEM/WB pipeline registers. Load
+  data, which arrives from the data memory in WB, is not forwarded: an
+  instruction that reads the result of the load right before it costs two
+  bubbles, one with a single instruction in between costs one bubble, and
+  either then reads the value from the register file.
 - Branch prediction, selected by parameter `BP_MODE`: `0` = static not-taken,
   `1` = BTB (direct-mapped, `BTB_ENTRIES` default 64) + 2-bit saturating
   counter BHT. A correctly predicted taken branch costs no bubble; a
