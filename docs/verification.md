@@ -118,7 +118,10 @@ differ from the default one:
   instructions, so for them only the output and exit code must match.
 - `randreset`: a build whose unreset flops and memories start random
   (`--x-initial unique`) runs the riscv-tests and the firmware tests for
-  three seeds, so nothing may depend on state that reset does not set.
+  three seeds, so nothing may depend on state that reset does not set. The
+  harness still writes the program into IMEM and DMEM and zeros the
+  register file, so what stays random is the state it does not write, such
+  as the BTB's tag, target and counter arrays and the NPU's operand buffers.
 - `uart-serial`: a build with the real UART (`SIM = 0`) must deliver every
   firmware test's output intact over the serial line, and `hello` must have
   found the transmitter busy, so the backpressure path is exercised.
