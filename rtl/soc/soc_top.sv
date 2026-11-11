@@ -105,13 +105,19 @@ module soc_top #(
   );
 
   // ------------------------------------------------------------------ IMEM
-  // Fetches outside the 64 KiB wrap around; nothing legal produces them.
+  // A fetch from outside the 64 KiB, or from an address that is not 4-byte
+  // aligned, reads the word 0, which is illegal, so the core halts at that
+  // pc (docs/spec.md 2) instead of wrapping or fetching the aligned word.
+  // The check clears the RAM's output register in the same cycle as the read
+  // (its synchronous output reset on the FPGA), so the fetched word passes
+  // through no extra logic and the result holds through fetch stalls.
   bram_sp #(
     .WORDS     (IMEM_WORDS),
     .INIT_FILE (IMEM_INIT)
   ) u_imem (
     .clk   (clk),
     .en    (imem_req),
+    .clr   ((imem_addr[31:IMEM_AW+2] != '0) || (imem_addr[1:0] != 2'b00)),
     .addr  (imem_addr[IMEM_AW+1:2]),
     .rdata (imem_rdata)
   );
@@ -250,6 +256,6 @@ module soc_top #(
   );
 
   logic unused;
-  assign unused = ^{imem_addr[31:IMEM_AW+2], imem_addr[1:0], npu_irq};
+  assign unused = npu_irq;
 
 endmodule

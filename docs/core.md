@@ -140,6 +140,11 @@ and sets a sticky flag that stops fetching. It then retires normally from WB
 (logged with `rd = 00`), and `halted` rises the following cycle. Nothing
 younger reaches MEM, so a store behind an ECALL never happens.
 
+A fetch from outside IMEM or from a pc that is not 4-byte aligned delivers
+the illegal word 0 (section 6), so a program that jumps or runs off IMEM,
+or jumps to a misaligned target, halts the same way at that pc (spec 2,
+"Bad fetches"). The ISS does the same, so the two logs end on the same line.
+
 The decoder is strict about reserved encodings that a simpler decoder might
 accept, because the ISS treats them as illegal too: shift-immediates with
 `imm[11:5]` other than `0000000`/`0100000` (so `slli` with `shamt[5] = 1`),
@@ -283,7 +288,12 @@ instruction has retired.
 **IMEM** (`bram_sp`): 16 K x 32 single-port ROM, read with one cycle of
 latency, output held while `en` (`imem_req`) is low. Contents come from
 `IMEM_INIT` (`$readmemh`, used for the bitstream) or, in simulation, from
-the harness's ELF loader.
+the harness's ELF loader. A fetch address outside the 64 KiB or not 4-byte
+aligned drives the RAM's `clr` input, which loads 0 into its output register
+instead of the word (the block RAM's synchronous output reset). The check
+runs in the request cycle, alongside the RAM access, so the fetched word
+passes through no extra logic; the only cost is the small address
+comparator.
 
 **DMEM** (`soc_dmem`): 64 K x 32 words in `BANKS = NPU_DMA_BYTES / 4`
 word-interleaved banks (4 by default), each a `bram_tdp` true dual-port RAM
@@ -377,7 +387,7 @@ and about 4 M cycles/s while writing a commit log.
 |------|---------|--------|
 | riscv-tests rv32ui + rv32um, `BP_MODE = 1` | `make test-isa-rtl` | 48/48 |
 | same, `BP_MODE = 0` | `make test-isa-rtl RTL_SIM=build/sim/soc_sim_bp0` | 48/48 |
-| directed tests, both builds | `make -C verif/core` | 24/24 runs |
+| directed tests, both builds | `make -C verif/core` | 30/30 runs |
 | lint | `make lint` | clean |
 | synthesis | `make -C rtl synth-check` | see section 9 |
 
@@ -387,7 +397,8 @@ kind of consumer, back-to-back and dependent divides and the M-extension
 corner cases, x0 under forwarding, BHT training patterns, wrong-path
 instructions (including stores and halting instructions) being squashed,
 BTB aliasing, call/return chains with changing return targets, the instret
-semantics, SoC address decoding, end-of-run ordering, and halting. Each
+semantics, SoC address decoding, end-of-run ordering, and halting, including
+fetches outside IMEM, off its end and from a misaligned pc. Each
 test checks its own results against constants (the M-extension values were
 computed with an independent Python model of the ISA), and `check.sh` also
 verifies the exit code, the UART output and that the commit log has exactly
@@ -432,8 +443,8 @@ Yosys `synth_ecp5` of `soc_top`, NPU included, with the `hello` image
 
 | Resource | `NPU_DMA_BYTES = 4` | `= 16` | Notes |
 |----------|-------------------:|-------:|-------|
-| LUT4 | 10132 | 10656 | with 2 per CCU2C, 14096 LUTs (16.9% of an ECP5-85F) at 16 |
-| CCU2C | 1693 | 1720 | carry chains |
+| LUT4 | 10252 | 10663 | with 2 per CCU2C, 14105 LUTs (16.9% of an ECP5-85F) at 16 |
+| CCU2C | 1699 | 1721 | carry chains |
 | TRELLIS_FF | 7188 | 7190 | |
 | DP16KD | 167 | 175 | DMEM 128 in both, IMEM 29, BTB 2, NPU operand buffers 8 / 16 |
 | TRELLIS_DPR16X4 | 36 | 36 | register file (16 per read port), BTB counters (4) |

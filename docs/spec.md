@@ -64,6 +64,13 @@ bug. Change the document in the same commit as the behavior.
 - `FENCE` and `FENCE.I` execute as no-ops.
 - **No traps or interrupts.** `ECALL`, `EBREAK` and illegal instructions
   *halt* the core when they reach WB (see section 7 for exit codes).
+- **Bad fetches.** An instruction fetch from outside IMEM (`pc >=
+  0x0001_0000`) or from an address that is not 4-byte aligned reads the word
+  `0x00000000`, which is illegal, so the core halts with exit code 3 at that
+  pc; the commit log's last line shows that pc, insn `00000000` and rd `00`.
+  Real RISC-V raises an instruction-address-misaligned exception on the jump
+  or branch to a misaligned target; Pulse has no traps, so it halts at the
+  target instead.
 - Misaligned loads and stores are not supported (behavior undefined; the
   compiler never emits them).
 
@@ -81,7 +88,8 @@ Decoding uses address bits `[31:28]`. Data accesses to any other address
 with no aliasing: addresses past the end of a region (e.g. `0x1004_0000`,
 `0x2000_1000`) and undefined MMIO or NPU offsets also read 0 and ignore
 writes. All MMIO and NPU registers are 32-bit and must be accessed with
-`lw`/`sw`.
+`lw`/`sw`. Instruction fetches from outside IMEM read the illegal word 0
+(section 2, "Bad fetches").
 
 | Address       | Name          | Access | Meaning |
 |---------------|---------------|--------|---------|

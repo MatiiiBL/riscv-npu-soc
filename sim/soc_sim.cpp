@@ -263,8 +263,11 @@ int main(int argc, char **argv) {
                 std::fprintf(stderr, "[rtl] halted by %s at pc 0x%08x\n",
                              last_insn == INSN_ECALL ? "ecall" : "ebreak", last_pc);
             } else {
-                std::fprintf(stderr, "[rtl] illegal instruction 0x%08x at pc 0x%08x\n", last_insn,
-                             last_pc);
+                const char *why = last_pc - IMEM_BASE >= IMEM_SIZE ? " (fetch outside IMEM)"
+                                  : (last_pc & 3) != 0             ? " (misaligned fetch)"
+                                                                   : "";
+                std::fprintf(stderr, "[rtl] illegal instruction 0x%08x at pc 0x%08x%s\n", last_insn,
+                             last_pc, why);
             }
             reported = static_cast<uint32_t>(code);
             break;

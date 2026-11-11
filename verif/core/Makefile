@@ -15,11 +15,15 @@ include ../../mk/toolchain.mk
 
 OUT := $(BUILD_DIR)/verif/core
 
-TESTS := fwd loaduse muldiv csr bpred calls bus uart halt_ecall halt_ebreak halt_illegal
+TESTS := fwd loaduse muldiv csr bpred calls bus uart halt_ecall halt_ebreak halt_illegal \
+         halt_fetch halt_fetch_end halt_fetch_misaligned
 
-EXPECT_halt_ecall   := 2
-EXPECT_halt_ebreak  := 2
-EXPECT_halt_illegal := 3
+EXPECT_halt_ecall            := 2
+EXPECT_halt_ebreak           := 2
+EXPECT_halt_illegal          := 3
+EXPECT_halt_fetch            := 3
+EXPECT_halt_fetch_end        := 3
+EXPECT_halt_fetch_misaligned := 3
 
 SIM_BP1 := $(BUILD_DIR)/sim/soc_sim
 SIM_BP0 := $(BUILD_DIR)/sim/soc_sim_bp0
