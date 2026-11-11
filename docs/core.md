@@ -380,20 +380,30 @@ so the same harness works for every `NPU_DMA_BYTES`. The register file
 starts at zero, like the ISS's.
 
 In the serial build the harness samples every bit of the 8N1 frames in its
-middle, keeps clocking after the run ends until the bytes stored to
-`UART_TX` before the end have arrived, and reports in `--stats` how many
+middle, keeps clocking after the run ends until the bytes of the retired
+`UART_TX` stores have arrived, and reports in `--stats` how many
 `UART_STATUS` reads found the transmitter busy. A byte written while the
 UART is busy is dropped by the hardware, so a firmware bug in the
-backpressure loop shows up as missing output on this build only.
+backpressure loop shows up as missing output on this build only. When the
+line does not carry exactly the written bytes, or a frame is malformed, the
+harness says so on stderr and a run that would exit with 0 exits with 1
+(spec 7.1).
 
 Each loop iteration observes one settled cycle and then clocks the model.
 Within a cycle the retirement port (the WB instruction) is handled before
 the MMIO write strobes (the MEM instruction), because WB holds the older
-instruction: the run ends right after the `SIM_EXIT` store retires, and a
-younger UART store that is already in MEM in that cycle must not reach
-stdout (`verif/core/uart.S` checks this). A halt is detected from `halted`
-in the cycle after the halting instruction retires; ECALL/EBREAK and
-illegal instructions are told apart by the retired instruction word.
+instruction. A UART byte is held from its store's strobe in MEM until that
+store retires, and only then reaches stdout (in the serial build: counts as
+written), so stdout always agrees with the commit log. The run ends right
+after the `SIM_EXIT` store retires, so a younger UART store already in MEM
+in that cycle does not print (`verif/core/uart.S` checks this), and neither
+does one in MEM when `--max-cycles` runs out (`uart_budget.S`, cut at every
+cycle by `budget-sweep`). The harness matches a retiring store to its byte
+by the strobe's own condition, a store to the `UART_TX` word that writes
+byte lane 0, so this holds whatever the distance from MEM to WB. A halt is
+detected from `halted` in the cycle after the halting instruction retires;
+ECALL/EBREAK and illegal instructions are told apart by the retired
+instruction word.
 
 Measured on an Apple M4 laptop (one thread): 11-16 M cycles/s for a
 load/store/branch loop with a register-only NPU model (variation from machine load),
@@ -406,11 +416,12 @@ and about 4 M cycles/s while writing a commit log.
 |------|---------|--------|
 | riscv-tests rv32ui + rv32um, `BP_MODE = 1` | `make test-isa-rtl` | 48/48 |
 | same, `BP_MODE = 0` | `make test-isa-rtl RTL_SIM=build/sim/soc_sim_bp0` | 48/48 |
-| directed tests, both builds, with difftest and `--stats` checks | `make -C verif/core` | 30/30 runs |
+| directed tests, both builds, with difftest and `--stats` checks | `make -C verif/core` | 32/32 runs |
+| stdout agrees with retirement for every `--max-cycles` budget | `make -C verif/core budget-sweep` | 101 + 111 budgets (bp1 + bp0) |
 | `soc_sim` and the ISS reject the same ELFs and command lines | `make -C verif/core cli` | 31/31 cases |
-| riscv-tests and firmware from random initial state, seeds 1-3 | `make -C verif/core randreset` | 3 x (48 + 8) |
-| predictor builds give identical commit logs | `make -C verif/core bp-compare` | 70/70 programs |
-| firmware output over the real serial UART | `make -C verif/core uart-serial` | 8/8 tests |
+| riscv-tests and firmware from random initial state, seeds 1-3 | `make -C verif/core randreset` | 3 x (48 + 11) |
+| predictor builds give identical commit logs | `make -C verif/core bp-compare` | 74/74 programs |
+| firmware output over the real serial UART, every budget of `uart.S`, line errors fail the run | `make -C verif/core uart-serial` | 11/11 tests, 141 budgets |
 | lint | `make lint` | clean |
 | synthesis | `make -C rtl synth-check` | see section 9 |
 
@@ -434,6 +445,17 @@ counter each test exists to exercise above zero (load-use stalls for
 `muldiv.S`). Only "above zero" is required, so these checks survive changes
 to the hazard costs. `timing.S` checks the pipeline costs of sections 1-3
 cycle-exactly, once per predictor mode.
+
+`budget-sweep` (part of `make -C verif/core`) runs `uart_budget.S`, which
+stores to `UART_TX` back to back, one and two instructions apart, after a
+load, ahead of a divide and in a loop, through `difftest.py` with every
+`--max-cycles` budget from 1 to the length of the run, on both predictor
+builds. Every budget must pass, so wherever the budget cuts the run, the
+RTL's stdout must be the ISS's after the same instructions. `uart-serial`
+does the same for `uart.S` on the serial build, against its own commit log
+(its `UART_STATUS` reads differ from the ISS's), and requires the harness
+to fail `uart_budget.S`, which loses bytes on the line because it does not
+poll.
 
 While the tests were written, each was checked against deliberately broken
 RTL (no MEM or WB forward, no load-use stall, no squash on redirect or halt,

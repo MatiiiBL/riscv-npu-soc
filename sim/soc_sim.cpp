@@ -17,14 +17,17 @@
 // Each loop iteration observes one clock cycle of the settled model and then
 // clocks it. Within a cycle the retirement port (WB) is handled before the
 // MMIO write strobes (MEM), because the WB instruction is the older of the
-// two: once the SIM_EXIT store retires, a younger store already in MEM must
-// not reach stdout.
+// two. A UART byte is held from its store's strobe in MEM until that store
+// retires, and only then counts as written, so stdout always agrees with the
+// commit log: a run that ends while the store is still in MEM (on the cycle
+// budget, or right after the SIM_EXIT store retires) does not print it.
 #include <algorithm>
 #include <cerrno>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,6 +48,9 @@ constexpr uint32_t DMEM_SIZE = 256 * 1024;
 constexpr uint32_t INSN_ECALL = 0x00000073;
 constexpr uint32_t INSN_EBREAK = 0x00100073;
 
+constexpr uint32_t UART_TX = 0x20000000;
+
+constexpr int EXIT_FAIL = 1;
 constexpr int EXIT_HALT = 2;
 constexpr int EXIT_ILLEGAL = 3;
 constexpr int EXIT_TIMEOUT = 124;
@@ -219,7 +225,7 @@ int exit_code_for(uint32_t value) {
     if (value == 0) {
         return 0;
     }
-    return (value & 0xff) != 0 ? static_cast<int>(value & 0xff) : 1;
+    return (value & 0xff) != 0 ? static_cast<int>(value & 0xff) : EXIT_FAIL;
 }
 
 // True for a legal load: the LOAD opcode with funct3 LB, LH, LW, LBU or
@@ -360,10 +366,17 @@ int main(int argc, char **argv) {
     int code = -1;
     uint32_t reported = 0;   // exit= field of the summary line
 
+    // Bytes whose UART_TX strobe has fired in MEM but whose store has not
+    // retired yet, oldest first. The strobe fires for a store to the UART_TX
+    // word that writes byte lane 0 (spec 3: the MMIO window does not alias),
+    // so the retiring store a byte belongs to is recognized by the same
+    // condition, whatever the distance from MEM to WB.
+    std::deque<uint8_t> uart_in_flight;
+
 #ifdef SOC_SIM_SERIAL_UART
     // stdout carries the bytes decoded from the serial line. `written` holds
-    // the bytes stored to UART_TX before the run ended, which is what the
-    // line must carry; busy_polls counts UART_STATUS reads that saw the
+    // the bytes stored to UART_TX by retired stores, which is what the line
+    // must carry; busy_polls counts UART_STATUS reads that saw the
     // transmitter busy, i.e. the firmware actually waited on backpressure.
     UartRx rx(SOC_SIM_UART_DIV);
     std::string written;
@@ -418,6 +431,16 @@ int main(int argc, char **argv) {
                 }
                 std::fputc('\n', log);
             }
+            if (top->rvfi_mem_addr == UART_TX && (top->rvfi_mem_wmask & 1) != 0 &&
+                !uart_in_flight.empty()) {
+                const uint8_t byte = uart_in_flight.front();
+                uart_in_flight.pop_front();
+#ifdef SOC_SIM_SERIAL_UART
+                written.push_back(static_cast<char>(byte));
+#else
+                std::fputc(byte, stdout);
+#endif
+            }
 #ifdef SOC_SIM_SERIAL_UART
             if (top->rvfi_mem_addr == UART_STATUS && top->rvfi_mem_wmask == 0 &&
                 top->rvfi_rd != 0 && (top->rvfi_rd_wdata & 1) == 0) {
@@ -428,11 +451,7 @@ int main(int argc, char **argv) {
         }
         if (!done) {
             if (top->sim_uart_valid) {
-#ifdef SOC_SIM_SERIAL_UART
-                written.push_back(static_cast<char>(top->sim_uart_data));
-#else
-                std::fputc(top->sim_uart_data, stdout);
-#endif
+                uart_in_flight.push_back(top->sim_uart_data);
             }
             if (top->sim_exit_valid) {
                 exit_pending = true;
@@ -466,9 +485,14 @@ int main(int argc, char **argv) {
             receive();
         }
     }
+    // If the line did not carry exactly the written bytes, stdout is not what
+    // the program wrote, so the run must not pass even if the program did.
     if (received != written.size() || rx.errors() != 0) {
         std::fprintf(stderr, "[rtl] UART: %zu bytes written to UART_TX, %zu received on the line, "
                      "%u framing errors\n", written.size(), received, rx.errors());
+        if (code == 0) {
+            code = EXIT_FAIL;
+        }
     }
 #endif
 

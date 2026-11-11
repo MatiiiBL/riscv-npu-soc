@@ -1,8 +1,13 @@
 # Directed pipeline tests for rv32_core (docs/core.md, "Verification").
 #
 #   make          build the tests and both simulators, run every test on
-#                 build/sim/soc_sim and build/sim/soc_sim_bp0, then `cli`
+#                 build/sim/soc_sim and build/sim/soc_sim_bp0, then
+#                 `budget-sweep` and `cli`
 #   make build    only build the test ELFs into build/verif/core/
+#   make budget-sweep
+#                 cut uart_budget.S at every cycle (--max-cycles 1, 2, ...)
+#                 on both simulators and require difftest to pass for each
+#                 budget, so stdout must agree with the retired UART stores
 #   make cli      check that soc_sim accepts and rejects the same command
 #                 lines and ELF files as the ISS (sim_cli.py)
 #   make randreset
@@ -16,7 +21,9 @@
 #   make uart-serial
 #                 run the firmware tests on build/sim/soc_sim_uart, which uses
 #                 the real UART (SIM = 0) and decodes stdout from its serial
-#                 line, and require hello to have waited on UART_STATUS
+#                 line, and require hello to have waited on UART_STATUS; also
+#                 cut uart.S at every cycle (stdout against the commit log)
+#                 and require uart_budget.S, which does not poll, to fail
 #
 # Each test is a bare-metal assembly program that checks its own results and
 # reports through SIM_EXIT like the riscv-tests (0 = pass, (case << 1) | 1 =
@@ -32,8 +39,8 @@ include ../../mk/toolchain.mk
 
 OUT := $(BUILD_DIR)/verif/core
 
-TESTS := fwd loaduse muldiv csr bpred calls bus uart halt_ecall halt_ebreak halt_illegal \
-         halt_fetch halt_fetch_end halt_fetch_misaligned
+TESTS := fwd loaduse muldiv csr bpred calls bus uart uart_budget halt_ecall halt_ebreak \
+         halt_illegal halt_fetch halt_fetch_end halt_fetch_misaligned
 
 EXPECT_halt_ecall            := 2
 EXPECT_halt_ebreak           := 2
@@ -75,8 +82,8 @@ SW_TESTS := $(patsubst $(REPO_ROOT)/sw/tests/%/Makefile,%,$(wildcard $(REPO_ROOT
 
 SIM_UART := $(BUILD_DIR)/sim/soc_sim_uart
 
-.PHONY: all build sims run cli randreset bp-compare uart-serial clean
-all: run cli
+.PHONY: all build sims run budget-sweep cli randreset bp-compare uart-serial clean
+all: run budget-sweep cli
 
 build: $(ELFS)
 
@@ -95,6 +102,10 @@ sims:
 	$(MAKE) -C $(REPO_ROOT)/sim BP_MODE=1
 	$(MAKE) -C $(REPO_ROOT)/sim BP_MODE=0
 	$(MAKE) -C $(REPO_ROOT)/tools/iss
+
+budget-sweep: build sims
+	$(PYTHON) budget_sweep.py --rtl $(SIM_BP1) --iss $(ISS) $(OUT)/uart_budget.elf $(OUT)/budget-sweep
+	$(PYTHON) budget_sweep.py --rtl $(SIM_BP0) --iss $(ISS) $(OUT)/uart_budget.elf $(OUT)/budget-sweep-bp0
 
 cli: build sims
 	$(PYTHON) sim_cli.py $(OUT)/fwd.elf $(OUT)/sim_cli $(SIM_BP1) $(ISS)
@@ -122,8 +133,9 @@ bp-compare: build sims
 
 # Every firmware test has an expected.txt, so the firmware runner checks the
 # bytes that arrived over the line; a byte written while the transmitter was
-# busy is dropped by the hardware and shows up as a mismatch.
-uart-serial:
+# busy is dropped by the hardware and shows up as a mismatch, and the harness
+# also fails the run itself (uart_budget.S writes without polling).
+uart-serial: build
 	$(MAKE) -C $(REPO_ROOT)/sim SERIAL_UART=1
 	$(MAKE) -s -C $(REPO_ROOT)/sw test SIMS=$(SIM_UART)
 	@busy=$$($(SIM_UART) --quiet --stats $(BUILD_DIR)/sw/hello.elf 2>&1 > /dev/null | \
@@ -131,6 +143,11 @@ uart-serial:
 	if [ -z "$$busy" ] || [ "$$busy" -eq 0 ]; then \
 	  echo "FAIL: hello never found the UART busy, so backpressure was not exercised"; exit 1; fi; \
 	echo "serial UART: hello found the transmitter busy in $$busy UART_STATUS reads"
+	@$(SIM_UART) --quiet $(OUT)/uart_budget.elf > /dev/null 2> $(OUT)/uart_budget.serial.err; \
+	rc=$$?; if [ $$rc -eq 0 ] || ! grep -q "received on the line" $(OUT)/uart_budget.serial.err; then \
+	  echo "FAIL: uart_budget lost bytes on the line, but soc_sim_uart exited with $$rc"; exit 1; fi; \
+	echo "serial UART: bytes lost on the line fail the run (exit code $$rc)"
+	$(PYTHON) budget_sweep.py --rtl $(SIM_UART) $(OUT)/uart.elf $(OUT)/budget-sweep-uart
 
 run: build sims
 	@pass=0; fail=0; \
