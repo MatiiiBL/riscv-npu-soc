@@ -6,14 +6,16 @@ has to slip past more than one independent check to reach the board:
 | Level | What runs | Checked against | Location | Command |
 |-------|-----------|-----------------|----------|---------|
 | ISA compliance | riscv-tests `rv32ui` + `rv32um` (48 tests) | self-checking tests | `verif/riscv-tests/` | `make test-isa` |
-| Core, directed | short pipeline-hazard programs | ISS + the cycle costs of spec section 6 | `verif/core/` | `make -C verif/core` |
+| Core, directed | short pipeline-hazard programs | ISS + the cycle costs of spec section 6 | `verif/core/` | `make test-core` |
 | Core, random | constrained-random RV32IM programs | ISS, commit log line by line | `verif/random/`, `tools/rvgen/`, `tools/difftest.py` | `make test-random` |
 | NPU unit | cocotb tests of `npu_top` | Python golden model | `verif/npu/` | `make test-npu` |
 | Firmware | C tests, including NPU driver tests | `expected.txt`, on both simulators | `sw/tests/` | `make test-sw` |
-| Reference model | ISS decode/execute and NPU model | hand-computed values | `tools/iss/test/` | `make -C tools/iss test` |
+| NPU driver portability | the NPU firmware tests with `ARR` = 4, 5, 6 | the tests' own software reference, on the ISS | `sw/tests/npu_*` | `make test-sw-arr` |
+| Reference model | ISS decode/execute and NPU model | hand-computed values | `tools/iss/test/` | `make test-iss` |
 | RTL hygiene | Verilator lint | `-Wall` clean | `rtl/` | `make lint` |
 
-`make test` runs all of them. Every target exits nonzero on a failure.
+`make test` runs every row of this table. Every target exits nonzero on a
+failure.
 
 `docs/spec.md` is the contract all of these are written against. When two
 models disagree, the spec decides which one is wrong, and when the spec does
