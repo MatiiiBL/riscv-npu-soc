@@ -47,7 +47,8 @@ prepare:
 
 # One seed: generate, build, difftest. The recipe never fails, so every seed
 # runs; it records PASS or the failure reason for the summary, and keeps the
-# files of failing seeds only.
+# files of failing seeds only. Not every program ends with SIM_EXIT = 0: the
+# exit code both models must report is in the generated file's header.
 $(RUNS): run-%: prepare
 	@base=$(WORK)/seed_$*; \
 	if ! $(PYTHON) $(RVGEN) --seed $* --length $(LEN) -o $$base.S > $$base.report 2>&1; then \
@@ -55,8 +56,14 @@ $(RUNS): run-%: prepare
 	elif ! $(RV_CC) $(GEN_FLAGS) $$base.S -o $$base.elf >> $$base.report 2>&1; then \
 	  result="build failed"; \
 	elif $(PYTHON) $(DIFFTEST) --rtl $(RTL_BIN) --iss $(ISS_BIN) --objdump $(RV_OBJDUMP) \
-	       --work-dir $(WORK) --timeout $(TIMEOUT) --expect-exit 0 --quiet $$base.elf >> $$base.report 2>&1; then \
-	  result=PASS; \
+	       --work-dir $(WORK) --timeout $(TIMEOUT) --quiet \
+	       --expect-exit $$(sed -n 's/.*must exit with code \([0-9][0-9]*\).*/\1/p' $$base.S) \
+	       $$base.elf >> $$base.report 2>&1; then \
+	  if grep -q 'misaligned loads/stores' $$base.iss.stderr; then \
+	    result="misaligned access (undefined behavior rvgen must not emit)"; \
+	  else \
+	    result=PASS; \
+	  fi; \
 	else \
 	  result=mismatch; \
 	fi; \

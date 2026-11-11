@@ -12,10 +12,14 @@ compares their commit logs. Every generated program
 - is deterministic: the text depends only on --seed and --length, never on
   the Python version or platform;
 - stays inside the behavior docs/spec.md defines: loads and stores are
-  aligned and stay inside a scratch buffer in DMEM, no cycle/time CSR reads
-  (they differ between the RTL and the ISS by design), no traps;
-- ends with `sw zero` to SIM_EXIT, so it passes on both models and only the
-  commit-log comparison decides.
+  aligned and go to a scratch buffer in DMEM or to fixed addresses (NPU and
+  MMIO registers with word accesses, never NPU START; unbacked and
+  region-edge addresses that read 0; DMEM's first and last words; IMEM,
+  whose data-port stores are dropped); no cycle/time CSR reads (they differ
+  between the RTL and the ISS by design), no traps;
+- ends with `sw zero` to SIM_EXIT, or (about a quarter of the seeds) with
+  ECALL, EBREAK, an illegal instruction or a fetch outside IMEM or from a
+  misaligned pc. The header names the exit code both models must report.
 
 The program is a sequence of "snippets" (an ALU op, a load followed by a
 dependent use, a forward branch, a loop, ...). Branch targets are only ever
@@ -57,6 +61,36 @@ ZERO_CSRS = [0x300, 0x301, 0x304, 0x305, 0x340, 0x342, 0xF11, 0xF14, 0x7C0]
 
 FENCES = ["fence", "fence rw, rw", "fence iorw, iorw", "fence w, r",
           ".insn i 0x0f, 1, x0, x0, 0"]  # fence.i, spelled so every LLVM accepts it
+
+# Fixed addresses outside the scratch buffer, written with the soc_map.h
+# names so the memory map has one source. MMIO and NPU registers take word
+# accesses only (spec 3). No store ever sets CTRL.START, so the NPU stays idle
+# and every register read is timing-independent.
+NPU_RW_REGS = ["NPU_A_ADDR", "NPU_B_ADDR", "NPU_C_ADDR", "NPU_M", "NPU_N", "NPU_K", "NPU_A_STRIDE",
+               "NPU_B_STRIDE", "NPU_C_STRIDE", "NPU_QUANT", "NPU_BIAS_ADDR", "NPU_QMULT"]
+NPU_READ_ONLY = ["NPU_STATUS", "NPU_CYCLES", "NPU_INFO", "NPU_CTRL"]  # CTRL reads 0
+# Words in the MMIO and NPU regions that are not registers: undefined
+# offsets, the last word of each window and the first words past it (which
+# must not alias the registers, so a store "to SIM_EXIT" there is ignored).
+ZERO_WORDS = ["MMIO_BASE + 0x8", "MMIO_BASE + 0xffc", "UART_TX + 0x1000", "SIM_EXIT + 0x1000",
+              "LEDS + 0x1000", "NPU_BASE + 0x40", "NPU_BASE + 0xffc", "NPU_CTRL + 0x1000", "NPU_INFO + 0x1000"]
+# Unbacked addresses that read 0 for any width and drop writes: IMEM through
+# the data port, just past IMEM and DMEM, and the unmapped regions.
+ZERO_ANY = ["IMEM_BASE", "IMEM_BASE + IMEM_SIZE - 4", "IMEM_BASE + IMEM_SIZE", "DMEM_BASE + DMEM_SIZE",
+            "0x40000000", "0x7ffffffc", "-0x80000000", "-4"]
+# The first and last words of DMEM (the scratch buffer starts at the first).
+DMEM_EDGES = ["DMEM_BASE", "DMEM_BASE + DMEM_SIZE - 4"]
+
+# How a program ends, with the exit code both models must report (spec 7.1).
+# Most end with SIM_EXIT = 0; the rest halt so those paths are compared too.
+ENDINGS = [(75, "exit"), (5, "ecall"), (5, "ebreak"), (5, "illegal"), (5, "fetch_outside"),
+           (5, "fetch_misaligned")]
+EXIT_CODES = {"exit": 0, "ecall": 2, "ebreak": 2, "illegal": 3, "fetch_outside": 3, "fetch_misaligned": 3}
+# Reserved encodings: all zeros, all ones, MRET and WFI (no privileged mode),
+# a custom-0 opcode, and an RV64-only shift amount.
+ILLEGAL_WORDS = [0x00000000, 0xFFFFFFFF, 0x30200073, 0x10500073, 0x0000000B, 0x02009093]
+# Fetch targets outside IMEM: just past it, in DMEM, and the top of memory.
+BAD_FETCH_TARGETS = ["IMEM_BASE + IMEM_SIZE", "DMEM_BASE", "-4"]
 
 
 class Rng:
@@ -109,10 +143,14 @@ def x(r):
 
 
 class Generator:
-    def __init__(self, seed, length):
+    def __init__(self, seed, length, ending=None):
         self.rng = Rng(seed)
         self.seed = seed
         self.length = length
+        # Drawn first and always, so the ending does not depend on --length
+        # and forcing one with --ending leaves the rest of the program as is.
+        drawn = self.rng.weighted(ENDINGS)
+        self.ending = ending or drawn
         self.lines = []
         self.count = 0          # instructions emitted so far (all blocks)
         self.label_ids = {}
@@ -383,6 +421,58 @@ class Generator:
         else:
             self.emit(f"lw {x(self.dest())}, 4({x(t)})")  # UART_STATUS
 
+    def device(self):
+        """A load or store at a fixed address outside the scratch buffer."""
+        t = self.dest(False)
+        kind = self.rng.below(7)
+        if kind == 0:
+            # An NPU register reads back the full 32 bits written (spec 5).
+            self.emit(f"li {x(t)}, {self.rng.choice(NPU_RW_REGS)}")
+            self.emit(f"sw {x(self.src())}, 0({x(t)})")
+            if self.rng.chance(60):
+                self.emit(f"lw {x(self.dest())}, 0({x(t)})")
+        elif kind == 1:
+            self.emit(f"li {x(t)}, {self.rng.choice(NPU_RW_REGS + NPU_READ_ONLY)}")
+            rd = self.dest()
+            self.emit(f"lw {x(rd)}, 0({x(t)})")
+            if self.rng.chance(40):
+                self.use(rd)
+        elif kind == 2:
+            # LEDS keeps only its low 8 bits (spec 3).
+            self.emit(f"li {x(t)}, LEDS")
+            self.emit(f"sw {x(self.src())}, 0({x(t)})")
+            self.emit(f"lw {x(self.dest())}, 0({x(t)})")
+        elif kind == 3:
+            # CTRL, or a word that reads 0 and ignores writes, always written
+            # with bit 0 clear: on CTRL or a CTRL alias that bit is START.
+            addr = self.rng.choice(["NPU_CTRL"] + ZERO_WORDS)
+            self.emit(f"li {x(t)}, {addr}")
+            if addr != "NPU_CTRL" and self.rng.chance(50):
+                self.emit(f"lw {x(self.dest())}, 0({x(t)})")
+            else:
+                # The value register must not be the one holding the address.
+                outer = self.reserved
+                self.reserved = outer | {t}
+                value = self.dest(False)
+                self.reserved = outer
+                self.emit(f"andi {x(value)}, {x(self.src())}, -2")
+                self.emit(f"sw {x(value)}, 0({x(t)})")
+        elif kind in (4, 5):
+            # Any aligned width at an unbacked address or a DMEM edge word.
+            self.emit(f"li {x(t)}, {self.rng.choice(ZERO_ANY + DMEM_EDGES)}")
+            if kind == 4:
+                op, width = self.rng.choice(LOADS)
+                reg = self.dest()
+            else:
+                op, width = self.rng.choice(STORES)
+                reg = self.src()
+            self.emit(f"{op} {x(reg)}, {self.rng.below(4 // width) * width}({x(t)})")
+        else:
+            # A store over the instruction right after it. IMEM is not
+            # writable from the data port, so the program runs on unchanged.
+            self.emit(f"auipc {x(t)}, 0")
+            self.emit(f"sw {x(self.src())}, 8({x(t)})")
+
     def fence(self):
         self.emit(self.rng.choice(FENCES))
 
@@ -431,7 +521,7 @@ class Generator:
         (14, alu_rr), (12, alu_ri), (3, upper), (9, muldiv), (3, shift_reg),
         (10, load), (9, store), (3, computed_address), (2, pointer_chase),
         (9, forward_branch), (3, jal), (3, jalr), (3, csr), (6, chain),
-        (1, uart), (1, fence),
+        (1, uart), (3, device), (1, fence),
     ]
 
     def snippet(self, context):
@@ -476,6 +566,27 @@ class Generator:
 
     # -- program ----------------------------------------------------------
 
+    def finish(self):
+        """The program's last instructions: SIM_EXIT = 0 or a halt."""
+        t = self.rng.choice(self.writable)
+        if self.ending == "exit":
+            self.emit(f"li {x(t)}, SIM_EXIT")
+            self.emit(f"sw x0, 0({x(t)})")
+        elif self.ending in ("ecall", "ebreak"):
+            self.emit(self.ending)
+        elif self.ending == "illegal":
+            self.emit(f".word {self.rng.choice(ILLEGAL_WORDS):#010x}")
+        elif self.ending == "fetch_outside":
+            self.emit(f"li {x(t)}, {self.rng.choice(BAD_FETCH_TARGETS)}")
+            self.emit(f"jalr {x(self.dest())}, 0({x(t)})")
+        else:
+            # JALR clears only bit 0 of the target, so offset 2 leaves it
+            # misaligned; the core halts at the target (spec 2).
+            self.emit(f"lla {x(t)}, halt")
+            self.emit(f"jalr {x(self.dest())}, 2({x(t)})")
+        self.label("halt")
+        self.emit("j halt")
+
     def program(self):
         self.lines.append(f"    lla {x(self.base)}, scratch + {SCRATCH_BYTES // 2}")
         for r in range(1, 32):
@@ -485,11 +596,7 @@ class Generator:
             self.snippet("top")
             self.place_due_labels()
         self.flush_labels()
-        t = self.rng.choice(self.writable)
-        self.emit(f"li {x(t)}, SIM_EXIT")
-        self.emit(f"sw x0, 0({x(t)})")
-        self.label("halt")
-        self.emit("j halt")
+        self.finish()
         for _, _, lines in self.subs:
             self.lines.extend(lines)
 
@@ -505,7 +612,8 @@ class Generator:
         header = [
             f"/* Generated by tools/rvgen/rvgen.py --seed {self.seed} --length {self.length}.",
             f" * Reserved: {x(self.base)} = scratch + {SCRATCH_BYTES // 2}, "
-            f"{x(self.counter)} = loop counter. */",
+            f"{x(self.counter)} = loop counter.",
+            f" * Ends with {self.ending}: both models must exit with code {EXIT_CODES[self.ending]}. */",
             '#include "soc_map.h"',
             "",
             '    .section .text.init, "ax"',
@@ -521,12 +629,14 @@ def main():
     parser.add_argument("--seed", type=int, required=True, help="random seed (any integer)")
     parser.add_argument("--length", type=int, default=2000,
                         help="approximate number of instructions (default 2000)")
+    parser.add_argument("--ending", choices=list(EXIT_CODES),
+                        help="how the program ends (default: chosen by the seed)")
     parser.add_argument("-o", "--output", default="-", help="output .S file (default stdout)")
     args = parser.parse_args()
     if not 1 <= args.length <= MAX_LENGTH:
         parser.error(f"--length must be between 1 and {MAX_LENGTH}")
 
-    text = Generator(args.seed, args.length).program()
+    text = Generator(args.seed, args.length, args.ending).program()
     if args.output == "-":
         sys.stdout.write(text)
     else:

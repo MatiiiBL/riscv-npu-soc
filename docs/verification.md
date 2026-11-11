@@ -108,16 +108,22 @@ builds with the normal firmware flags, `sw/common/link.ld` and
   straight-line subroutines that return through a link register their bodies
   cannot write. Branch targets are placed only between whole snippets, so no
   branch can jump into a loop and skip its counter setup.
-- **stays inside defined behavior.** Loads and stores are aligned and stay
-  inside a 4 KiB scratch buffer in DMEM (the base register points at its
-  middle, so offsets go both ways). Programs never read `cycle` or `time`,
-  never touch the NPU, and never trap.
+- **stays inside defined behavior.** Loads and stores are aligned. Most go
+  to a 4 KiB scratch buffer in DMEM (the base register points at its middle,
+  so offsets go both ways); the rest go to fixed addresses, listed below.
+  Programs never read `cycle` or `time` and never start the NPU, so nothing
+  depends on timing. The random flow fails any seed in which the ISS sees a
+  misaligned access, so this promise is checked on every run.
 - **is deterministic.** A private splitmix64 PRNG makes the output depend only
   on `--seed` and `--length`, not on the Python version. The buffer contents
   come from a separate stream, so a shorter `--length` produces a prefix of the
-  same program with the same data (see 4.4).
-- **ends with `sw zero` to `SIM_EXIT`.** Both models exit 0, so only the
-  comparison decides.
+  same program with the same data and the same ending (see 4.4).
+- **ends in a known way.** Three quarters of the seeds end with `sw zero` to
+  `SIM_EXIT`; the rest end with `ECALL` or `EBREAK` (exit 2), a reserved
+  encoding (`0`, all ones, `MRET`, `WFI`, a custom opcode, an RV64-only shift;
+  exit 3), or a jump outside IMEM or to a misaligned pc (exit 3, spec 2). The
+  file header names the exit code, which the random flow requires from both
+  models; `--ending` forces one.
 
 The program is a random sequence of snippets, chosen to be hazard-dense:
 
@@ -136,12 +142,23 @@ The program is a random sequence of snippets, chosen to be hazard-dense:
 - dependent chains of 2 to 5 ALU/M ops, writes to `x0`, `instret`/`instreth`/
   `minstret` reads, writes to CSRs that must be ignored, reads of CSRs that
   must return 0, `FENCE`/`FENCE.I`, and occasional UART writes (so stdout is
-  compared too).
+  compared too);
+- word accesses to the NPU registers (writes read back with all 32 bits,
+  `STATUS`, `INFO`, `CYCLES` and write-only `CTRL` reads, `CTRL` writes with
+  `START` clear), `LEDS` (8 bits read back) and `UART_STATUS`;
+- addresses that must read 0 and drop writes: undefined MMIO and NPU offsets,
+  the last word of each window and the words just past it (a store to the
+  would-be alias of `SIM_EXIT` or `CTRL` must do nothing), IMEM through the
+  data port, just past IMEM and DMEM, and the unmapped regions, at every
+  width; DMEM's first and last words; and a store over the next instruction,
+  which must not change what executes.
 
-Over 40 seeds of 2000 instructions every branch type is both taken and not
-taken thousands of times, backward loop branches are taken about 7000 times,
-and there are about 12,000 load-use pairs (into ALU/address, branch, store
-data and `JALR`). The base and counter registers are picked per seed, so no
+Over 40 seeds of 2000 instructions (about 98,000 executed instructions) every
+branch type is both taken and not taken hundreds of times, backward loop
+branches are taken about 2500 times, and there are about 4300 load-use pairs
+(into ALU/address, branch, store data and `JALR`). Of the 19,000 loads and
+stores, about 1100 go to MMIO, 660 to NPU registers, 320 to IMEM and 140 to
+unmapped regions. The base and counter registers are picked per seed, so no
 register is permanently left out of the hazard mix.
 
 ### 4.2 Comparison
