@@ -222,6 +222,16 @@ int exit_code_for(uint32_t value) {
     return (value & 0xff) != 0 ? static_cast<int>(value & 0xff) : 1;
 }
 
+// True for a legal load: the LOAD opcode with funct3 LB, LH, LW, LBU or
+// LHU. The retirement port's rvfi_mem_addr is the load's word address, but
+// it is also 0 for an instruction without a memory access, so the opcode
+// tells the two apart; the reserved funct3 values are illegal instructions,
+// which have no memory access.
+bool is_load(uint32_t insn) {
+    const uint32_t funct3 = (insn >> 12) & 7;
+    return (insn & 0x7f) == 0x03 && funct3 != 3 && funct3 != 6 && funct3 != 7;
+}
+
 struct PerfCounters {
     uint64_t cycles, instret;
     uint32_t load_use, ctrl, mispredict, div_stall;
@@ -398,9 +408,13 @@ int main(int argc, char **argv) {
             if (log != nullptr) {
                 std::fprintf(log, "%08x %08x %02u %08x", top->rvfi_pc, top->rvfi_insn,
                              static_cast<unsigned>(top->rvfi_rd), top->rvfi_rd_wdata);
+                // Spec 7.2: loads and stores carry their word address; a
+                // load has wmask 0 and wdata 0.
                 if (top->rvfi_mem_wmask != 0) {
                     std::fprintf(log, " M %08x %x %08x", top->rvfi_mem_addr,
                                  static_cast<unsigned>(top->rvfi_mem_wmask), top->rvfi_mem_wdata);
+                } else if (is_load(top->rvfi_insn)) {
+                    std::fprintf(log, " M %08x 0 00000000", top->rvfi_mem_addr);
                 }
                 std::fputc('\n', log);
             }
