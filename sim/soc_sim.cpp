@@ -186,16 +186,19 @@ int main(int argc, char **argv) {
         top->trace(vcd.get(), 99);
         vcd->open(opt.vcd);
     }
+    // Waveform time in ps (the VCD timescale): a nominal 10 ns clock, so
+    // cycle n of the run starts at n * 10 ns.
+    constexpr uint64_t HALF_PERIOD_PS = 5000;
     uint64_t sim_time = 0;
     auto tick = [&]() {
         top->clk = 0;
         top->eval();
         if (vcd) vcd->dump(sim_time);
-        sim_time++;
+        sim_time += HALF_PERIOD_PS;
         top->clk = 1;
         top->eval();
         if (vcd) vcd->dump(sim_time);
-        sim_time++;
+        sim_time += HALF_PERIOD_PS;
     };
 
     top->clk = 1;
