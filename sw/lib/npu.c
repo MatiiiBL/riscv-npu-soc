@@ -2,6 +2,7 @@
 #include "npu.h"
 #include "soc.h"
 
+static uint32_t commands;
 static uint32_t busy_cycles;
 
 static inline uint32_t addr(const void *p) {
@@ -22,16 +23,22 @@ npu_info_t npu_info(void) {
     return r;
 }
 
+uint32_t npu_commands(void) {
+    return commands;
+}
+
 uint32_t npu_busy_cycles(void) {
     return busy_cycles;
 }
 
-void npu_busy_cycles_reset(void) {
+void npu_counters_reset(void) {
+    commands = 0;
     busy_cycles = 0;
 }
 
 /*
- * Starts the programmed command and waits for DONE. The fences order the
+ * Starts the programmed command and waits for DONE. This is the only place
+ * that writes START, so the command counter is exact. The fences order the
  * CPU's earlier stores to the operands before the NPU's DMA reads them, and
  * the NPU's results before the CPU's later loads. They cost nothing on
  * Pulse (FENCE is a no-op on an in-order core with one memory) but they are
@@ -41,6 +48,7 @@ void npu_busy_cycles_reset(void) {
 static int run(uint32_t ctrl) {
     __asm__ volatile("fence" ::: "memory");
     REG32(NPU_CTRL) = NPU_CTRL_START | ctrl;
+    commands++;
     uint32_t status;
     do {
         status = REG32(NPU_STATUS);
@@ -71,14 +79,14 @@ int npu_gemm_tile(const gemm_op_t *op, uint32_t ctrl) {
     return run(ctrl & (NPU_CTRL_ACC_KEEP | NPU_CTRL_NO_WB | NPU_CTRL_A_KEEP | NPU_CTRL_B_KEEP));
 }
 
-/* Issues every K chunk of the output tile at (m0, n0). */
-static int gemm_tile_k(const gemm_op_t *op, uint32_t arr, uint32_t kchunk, uint32_t m0,
-                       uint32_t n0, uint32_t keep) {
+/* Issues every K chunk of the mt x nt output tile at (m0, n0). */
+static int gemm_tile_k(const gemm_op_t *op, uint32_t m0, uint32_t n0, uint32_t mt, uint32_t nt,
+                       uint32_t kchunk, uint32_t keep) {
     uint32_t a_row = addr(op->a) + m0 * op->a_stride;
     uint32_t b_row = addr(op->b) + n0 * op->b_stride;
     uint32_t c_elem = (op->quant & NPU_QUANT_OUT_INT8) ? 1u : 4u;
-    REG32(NPU_M) = min_u32(arr, op->m - m0);
-    REG32(NPU_N) = min_u32(arr, op->n - n0);
+    REG32(NPU_M) = mt;
+    REG32(NPU_N) = nt;
     REG32(NPU_C_ADDR) = addr(op->c) + m0 * op->c_stride + n0 * c_elem;
     REG32(NPU_BIAS_ADDR) = op->bias ? addr(op->bias + n0) : 0u;
     for (uint32_t k0 = 0; k0 < op->k; k0 += kchunk) {
@@ -101,6 +109,13 @@ static int gemm_tile_k(const gemm_op_t *op, uint32_t arr, uint32_t kchunk, uint3
  * only the registers that change are rewritten: the operand addresses, plus
  * M/N/K at the edges.
  *
+ * Every command's C_ADDR must be a multiple of 4. Row tiles start whole C
+ * rows apart, which C_STRIDE keeps aligned, but a column tile of an INT8 C
+ * starts n0 bytes into the row, so INT8 column tiles are ARR rounded down
+ * to a multiple of 4 wide (on a 6 x 6 array, 6 x 4 tiles). That only
+ * matters when there is more than one column tile: an INT8 C at most ARR
+ * wide is a single column, on any array.
+ *
  * Loading operands dominates an NPU command, and the NPU can skip reloading
  * A or B when a command asks for the rows it loaded last time (A_KEEP /
  * B_KEEP; it compares address, stride, row count and K, so a mismatch just
@@ -111,35 +126,41 @@ static int gemm_tile_k(const gemm_op_t *op, uint32_t arr, uint32_t kchunk, uint3
  * buffers since the previous call. With K split into chunks the operand
  * addresses change every command, so nothing is kept.
  *
- * K chunks are KMAX rounded down to a multiple of 4 so that every chunk of
- * an A or B row starts on a word boundary, as the NPU requires. The bias is
- * applied by the final chunk only, because write-back (where the NPU adds
- * it) happens only there.
+ * K is split only when it exceeds KMAX, into chunks of KMAX rounded down to
+ * a multiple of 4 so that every chunk of an A or B row starts on a word
+ * boundary, as the NPU requires. The bias is applied by the final chunk
+ * only, because write-back (where the NPU adds it) happens only there.
  */
 int npu_gemm(const gemm_op_t *op) {
     if (op->m == 0 || op->n == 0) {
         return NPU_OK;
     }
-    npu_info_t info = npu_info();
-    uint32_t arr = info.arr;
-    uint32_t kchunk = info.kmax & ~3u;
-    if (arr == 0 || kchunk == 0 || op->k == 0) {
+    if (op->k == 0) {
         return NPU_ERROR;
     }
+    npu_info_t info = npu_info();
+    uint32_t arr = info.arr;
+    int int8_columns = (op->quant & NPU_QUANT_OUT_INT8) && op->n > arr;
+    uint32_t n_step = int8_columns ? arr & ~3u : arr;
+    uint32_t kchunk = op->k <= info.kmax ? op->k : info.kmax & ~3u;
+    if (n_step == 0 || kchunk == 0) {
+        return NPU_UNSUPPORTED;
+    }
     uint32_t m_tiles = (op->m + arr - 1) / arr;
-    uint32_t n_tiles = (op->n + arr - 1) / arr;
+    uint32_t n_tiles = (op->n + n_step - 1) / n_step;
     int n_inner = n_tiles >= m_tiles;
     uint32_t keep = n_inner ? NPU_CTRL_A_KEEP : NPU_CTRL_B_KEEP;
-    uint32_t outer_len = n_inner ? op->m : op->n;
-    uint32_t inner_len = n_inner ? op->n : op->m;
+    uint32_t outer_tiles = n_inner ? m_tiles : n_tiles;
+    uint32_t inner_tiles = n_inner ? n_tiles : m_tiles;
 
     program_common(op);
-    for (uint32_t outer = 0; outer < outer_len; outer += arr) {
-        for (uint32_t inner = 0; inner < inner_len; inner += arr) {
-            uint32_t m0 = n_inner ? outer : inner;
-            uint32_t n0 = n_inner ? inner : outer;
+    for (uint32_t outer = 0; outer < outer_tiles; outer++) {
+        for (uint32_t inner = 0; inner < inner_tiles; inner++) {
+            uint32_t m0 = (n_inner ? outer : inner) * arr;
+            uint32_t n0 = (n_inner ? inner : outer) * n_step;
             uint32_t first = outer == 0 && inner == 0;
-            if (gemm_tile_k(op, arr, kchunk, m0, n0, first ? 0u : keep) != NPU_OK) {
+            if (gemm_tile_k(op, m0, n0, min_u32(arr, op->m - m0), min_u32(n_step, op->n - n0),
+                            kchunk, first ? 0u : keep) != NPU_OK) {
                 return NPU_ERROR;
             }
         }

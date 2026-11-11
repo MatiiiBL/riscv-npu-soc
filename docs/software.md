@@ -106,10 +106,14 @@ typedef struct {
 | `npu_gemm_tile(op, ctrl)` | exactly one NPU command (M, N <= ARR, K <= KMAX); `ctrl` may add `NPU_CTRL_ACC_KEEP`, `NPU_CTRL_NO_WB`, `NPU_CTRL_A_KEEP` and `NPU_CTRL_B_KEEP` |
 | `npu_gemm(op)` | any M, N >= 0 and K >= 1, tiled as described below |
 | `npu_linear(layer, x, x_stride, y, y_stride, batch)` | a fully connected layer on a batch of input rows; `linear_t` holds weights, bias, sizes and write-back mode |
-| `npu_busy_cycles()` | sum of the NPU's own `CYCLES` over all commands since `npu_busy_cycles_reset()` |
+| `npu_commands()`, `npu_busy_cycles()` | commands started (`START` writes) and the sum of the NPU's own `CYCLES` over them, since `npu_counters_reset()` |
 
-All calls return `NPU_OK` or `NPU_ERROR` (the NPU set `STATUS.ERR`) and are
-synchronous: they program the registers, write `CTRL.START`, poll
+All calls return `NPU_OK` or `NPU_ERROR` (the NPU set `STATUS.ERR`);
+`npu_gemm()` and `npu_linear()` can also return `NPU_UNSUPPORTED` without
+issuing a command, for the two GEMMs the driver cannot tile (INT8 output
+wider than one tile on an array narrower than 4, and K > KMAX with
+KMAX < 4; see below). Neither occurs for ARR >= 4 and KMAX >= 4. All calls
+are synchronous: they program the registers, write `CTRL.START`, poll
 `STATUS.DONE` and return with the NPU idle. A `fence` with a compiler
 memory clobber on each side of the command orders the CPU's operand stores
 before the NPU's DMA and the NPU's results before the CPU's next loads; it
@@ -140,17 +144,22 @@ tiles as M; otherwise M and N swap roles and `B_KEEP` is used):
 
 ```
 for m0 in 0, ARR, 2 ARR ... < M:          M register = min(ARR, M - m0)
-  for n0 in 0, ARR, ... < N:              N register = min(ARR, N - n0)
+  for n0 in 0, NS, 2 NS ... < N:          N register = min(NS, N - n0)
     C_ADDR = &C[m0][n0], BIAS_ADDR = &bias[n0]
-    for k0 in 0, KC, 2 KC ... < K:        KC = KMAX rounded down to a multiple of 4
+    for k0 in 0, KC, 2 KC ... < K:
       A_ADDR = &A[m0][k0], B_ADDR = &B[n0][k0], K = min(KC, K - k0)
       CTRL = START | (k0 > 0 ? ACC_KEEP : 0) | (last chunk ? 0 : NO_WB)
                    | (first command of the call ? 0 : A_KEEP)
+
+NS = ARR, except for INT8 output with N > ARR: ARR rounded down to a multiple of 4
+KC = K if K <= KMAX, else KMAX rounded down to a multiple of 4
 ```
 
 - **Operand loading dominates** an NPU command: the DMA brings in
-  `(m + n) * ceil(K/4)` words over one 32-bit port before the array starts,
-  against `K + m + n` cycles of compute (docs/npu.md, section 6). The NPU can
+  `(m + n) * ceil(K / D)` aligned blocks of `D = NPU_DMA_BYTES` bytes (16 in
+  the default SoC, one block per cycle) before the array starts, against
+  `K + m + n` cycles of compute (docs/npu.md, section 6), so for a full tile
+  at `D = 16` loading takes about as long as computing. The NPU can
   skip reloading A or B when a command asks for exactly the rows it loaded
   last time (`A_KEEP` / `B_KEEP`; it compares address, stride, row count
   and K, so any difference simply reloads). The driver holds the operand of
@@ -166,12 +175,20 @@ for m0 in 0, ARR, 2 ARR ... < M:          M register = min(ARR, M - m0)
   4 long so that each chunk of an A or B row starts on a word boundary. The
   operand addresses change with every chunk, so a split GEMM reloads both
   operands for every command.
+- **INT8 column tiles are a multiple of 4 wide.** `C_ADDR` must be a
+  multiple of 4, and the tile at column `n0` of an INT8 C starts `n0` bytes
+  into the row, so when C is wider than one tile the driver steps N by ARR
+  rounded down to a multiple of 4 (6 x 4 tiles on a 6 x 6 array, two
+  columns of PEs idle). On an array narrower than 4 that step is 0, and
+  `npu_gemm()` returns `NPU_UNSUPPORTED`. INT32 output and an INT8 C at
+  most ARR wide tile normally on any array.
 - **Registers are written once per GEMM** where possible: strides, `QUANT`
   and `QMULT` are the same for every tile, so between commands the driver
   rewrites only the operand addresses and, at the edges, M, N and K.
 - **ARR and KMAX come from `INFO`**, so the same binary drives a differently
-  sized array.
-- A GEMM takes `ceil(M/ARR) * ceil(N/ARR) * ceil(K/KC)` commands, each with a
+  sized array; `make -C sw test` runs the NPU tests on the ISS for every
+  ARR from 2 to 7 as well as the default 8.
+- A GEMM takes `ceil(M/ARR) * ceil(N/NS) * ceil(K/KC)` commands, each with a
   fixed cost (register writes, polling, the write-back pipeline), so small
   K and narrow tiles amortize poorly; the GEMM benchmark shows where this
   crosses over.
@@ -221,7 +238,10 @@ NPU path reproduce every one.
 in `sw/tests/` on each simulator (both by default). A test passes when it
 exits with 0 and its UART output equals `expected.txt` byte for byte.
 Tests print only deterministic text (no cycle counts), so one
-`expected.txt` serves every simulator.
+`expected.txt` serves every simulator. The NPU tests (`npu_*`) adapt to ARR
+and KMAX from `INFO`, so on the ISS they run again with `--npu-arr` set to
+each size in `NPU_ARRS` (default `2 3 4 5 6 7`); `expected.txt` holds the
+ARR = 8 output, so those runs are judged by the exit code.
 
 | Test | Checks |
 |------|--------|
@@ -231,8 +251,8 @@ Tests print only deterministic text (no cycle counts), so one
 | `crc32` | CRC-32 and CRC-32C, bitwise and table-driven, against the published check values and each other, one-shot and chunked |
 | `recursion` | naive Fibonacci vs iterative, Ackermann, Towers of Hanoi, a recursive-descent expression parser |
 | `muldiv` | all 8 M instructions via inline asm against a reference with no M instructions, on all pairs of 16 corner operands, 500 random pairs, the ISA's division corner cases as literals, and back-to-back dependent chains |
-| `npu_gemm` | the NPU against `sw_gemm` (pinned by literal known answers): random tiles, edge shapes, every write-back option, NO_WB / ACC_KEEP sequences, A_KEEP / B_KEEP on commands that must reload, all 13 invalid-command cases, tiled GEMMs, a linear layer; whole canary-filled output buffers are compared, so stray writes fail too |
-| `npu_ksplit` | K beyond KMAX through `npu_gemm` and by hand with uneven chunks |
+| `npu_gemm` | the NPU against `sw_gemm` (pinned by literal known answers): random tiles, edge shapes, every write-back option, NO_WB / ACC_KEEP sequences, A_KEEP / B_KEEP on commands that must reload, all 13 invalid-command cases, tiled GEMMs, a linear layer; whole canary-filled output buffers are compared, so stray writes fail too. On arrays narrower than 4 it checks that `npu_gemm()` refuses INT8 output wider than one tile (`NPU_UNSUPPORTED`) without writing anything |
+| `npu_ksplit` | K beyond KMAX through `npu_gemm` and by hand with uneven chunks; each line prints the number of commands the driver started (`npu_commands()`), so `expected.txt` also pins how many commands a GEMM costs |
 
 ## Benchmarks
 

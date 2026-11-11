@@ -6,6 +6,10 @@
  * with output shapes from one element to several tiles; then the same
  * accumulation driven by hand with uneven chunk sizes through
  * npu_gemm_tile().
+ *
+ * Each line reports the number of commands the driver actually started
+ * (its count of START writes), so expected.txt also pins how many commands
+ * npu_gemm() spends: one per K chunk of each output tile is the minimum.
  */
 #include "npu.h"
 #include "rng.h"
@@ -57,20 +61,34 @@ static void reference(const gemm_op_t *op) {
     gemm_op_t sw = *op;
     sw.c = c_sw;
     sw_gemm(&sw);
+    npu_counters_reset();
 }
 
-static int report(const char *how, const gemm_op_t *op, uint32_t commands, int rc) {
-    int ok = rc == NPU_OK && memcmp(c_npu, c_sw, sizeof c_npu) == 0;
+static int untouched(const uint8_t *p, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        if (p[i] != CANARY) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * Checks the result of the commands issued since reference(). On arrays
+ * narrower than 4, npu_gemm() must refuse INT8 output wider than one tile
+ * (NPU_UNSUPPORTED) before starting any command.
+ */
+static int report(const char *how, const gemm_op_t *op, int rc, uint32_t arr) {
+    int int8_out = (op->quant & NPU_QUANT_OUT_INT8) != 0;
+    int ok;
+    if (int8_out && op->n > arr && arr < 4) {
+        ok = rc == NPU_UNSUPPORTED && npu_commands() == 0 && untouched(c_npu, sizeof c_npu);
+    } else {
+        ok = rc == NPU_OK && memcmp(c_npu, c_sw, sizeof c_npu) == 0;
+    }
     printf("%s M=%u N=%u K=%u %s: %u commands %s\n", how, op->m, op->n, op->k,
-           (op->quant & NPU_QUANT_OUT_INT8) ? "int8" : "int32", commands, ok ? "ok" : "FAIL");
+           int8_out ? "int8" : "int32", npu_commands(), ok ? "ok" : "FAIL");
     return ok ? 0 : 1;
-}
-
-/* Commands npu_gemm issues: one per K chunk of every output tile. */
-static uint32_t command_count(const gemm_op_t *op, const npu_info_t *info) {
-    uint32_t chunk = info->kmax & ~3u;
-    uint32_t tiles = ((op->m + info->arr - 1) / info->arr) * ((op->n + info->arr - 1) / info->arr);
-    return tiles * ((op->k + chunk - 1) / chunk);
 }
 
 int main(void) {
@@ -94,7 +112,8 @@ int main(void) {
         for (int int8_out = 0; int8_out < 2; int8_out++) {
             gemm_op_t op = make_op(cases[i][0], cases[i][1], cases[i][2], int8_out);
             reference(&op);
-            failures += report("npu_gemm", &op, command_count(&op, &info), npu_gemm(&op));
+            int rc = npu_gemm(&op);
+            failures += report("npu_gemm", &op, rc, A);
         }
     }
 
@@ -105,7 +124,7 @@ int main(void) {
         gemm_op_t op = make_op(A, A - 1, 2000, int8_out);
         reference(&op);
         int rc = NPU_OK;
-        uint32_t k0 = 0, commands = 0;
+        uint32_t k0 = 0;
         for (size_t c = 0; k0 < op.k; c = (c + 1) % (sizeof chunks / sizeof chunks[0])) {
             uint32_t len = chunks[c] < op.k - k0 ? chunks[c] : op.k - k0;
             len = len < (K & ~3u) ? len : (K & ~3u);
@@ -116,9 +135,8 @@ int main(void) {
             uint32_t ctrl = (k0 > 0 ? NPU_CTRL_ACC_KEEP : 0u) | (k0 + len < op.k ? NPU_CTRL_NO_WB : 0u);
             rc |= npu_gemm_tile(&part, ctrl);
             k0 += len;
-            commands++;
         }
-        failures += report("by hand ", &op, commands, rc);
+        failures += report("by hand ", &op, rc, A);
     }
 
     printf("%s\n", failures ? "FAIL" : "PASS");

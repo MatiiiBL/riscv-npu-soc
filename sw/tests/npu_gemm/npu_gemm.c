@@ -20,6 +20,11 @@
  *                         nothing written, the next command works
  *   7. tiled GEMM         random M x N x K beyond one tile (npu_gemm)
  *   8. linear layer       npu_linear vs sw_linear
+ *
+ * Everything adapts to ARR and KMAX from the INFO register, so the test also
+ * passes on the ISS with any --npu-arr from 2 to 16. On arrays narrower than
+ * 4, npu_gemm() must refuse INT8 output wider than one tile (NPU_UNSUPPORTED)
+ * without writing anything; sections 7 and 8 check that instead.
  */
 #include "npu.h"
 #include "rng.h"
@@ -122,6 +127,15 @@ static void fill_canary(uint32_t span) {
     memset(c_sw, CANARY, span);
 }
 
+static int all_canary(const uint8_t *p, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        if (p[i] != CANARY) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int report_mismatch(const char *what, const gemm_op_t *op) {
     uint32_t span = c_span(op);
     if (memcmp(c_npu, c_sw, span) == 0) {
@@ -138,8 +152,14 @@ static int report_mismatch(const char *what, const gemm_op_t *op) {
     return 0;
 }
 
+/* Whether npu_gemm() can tile op on this NPU (see NPU_UNSUPPORTED). */
+static int tiling_supported(const gemm_op_t *op) {
+    return !(op->quant & NPU_QUANT_OUT_INT8) || op->n <= info.arr || info.arr >= 4;
+}
+
 /* Runs op on the NPU (one command with ctrl, or tiled) and in software;
- * 0 if equal. */
+ * 0 if equal. A tiled op the driver cannot tile must instead be refused
+ * with nothing written. */
 static int compare(const char *what, const gemm_op_t *op, int tiled, uint32_t ctrl) {
     fill_canary(c_span(op));
     gemm_op_t sw = *op;
@@ -148,6 +168,14 @@ static int compare(const char *what, const gemm_op_t *op, int tiled, uint32_t ct
     gemm_op_t hw = *op;
     hw.c = c_npu;
     int rc = tiled ? npu_gemm(&hw) : npu_gemm_tile(&hw, ctrl);
+    if (tiled && !tiling_supported(op)) {
+        if (rc == NPU_UNSUPPORTED && all_canary(c_npu, c_span(op))) {
+            return 0;
+        }
+        printf("  %s: m=%u n=%u k=%u INT8 on ARR=%u: rc=%d, want NPU_UNSUPPORTED and C untouched\n",
+               what, op->m, op->n, op->k, info.arr, rc);
+        return 1;
+    }
     if (rc != NPU_OK) {
         printf("  %s: m=%u n=%u k=%u: NPU reported ERR\n", what, op->m, op->n, op->k);
         return 1;
@@ -299,15 +327,6 @@ static gemm_op_t k_slice(const gemm_op_t *op, uint32_t k0, uint32_t k1) {
     return s;
 }
 
-static int all_canary(const uint8_t *p, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) {
-        if (p[i] != CANARY) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static int accumulate_flags(void) {
     uint32_t failed = 0, cases = 0;
     const uint32_t A = info.arr;
@@ -425,7 +444,8 @@ static int operand_reuse(void) {
 /* ---- 6. Errors ---- */
 
 static int errors(void) {
-    gemm_op_t good = random_op(3, 5, 12, 0, 1);
+    /* A valid command on any array, so only the one change makes it bad. */
+    gemm_op_t good = random_op(info.arr - 1, info.arr, 12, 0, 1);
     uint32_t failed = 0, cases = 0;
     for (int e = 0; e < 13; e++) {
         gemm_op_t op = good;
@@ -489,8 +509,17 @@ static int linear(void) {
     rng_fill_i8(&rng, b_buf, 13 * 100);
     fill_canary(C_BYTES);
     int rc = npu_linear(&l, a_buf, data.a_stride, c_npu, 16, MAX_MN);
-    sw_linear(&l, a_buf, data.a_stride, c_sw, 16, MAX_MN);
-    uint32_t failed = rc != NPU_OK || memcmp(c_npu, c_sw, C_BYTES) != 0;
+    uint32_t failed;
+    if (info.arr < 4) {
+        /* 13 INT8 outputs are more than one column tile here. */
+        failed = rc != NPU_UNSUPPORTED || !all_canary(c_npu, C_BYTES);
+    } else {
+        sw_linear(&l, a_buf, data.a_stride, c_sw, 16, MAX_MN);
+        failed = rc != NPU_OK || memcmp(c_npu, c_sw, C_BYTES) != 0;
+    }
+    if (failed) {
+        printf("  linear layer: rc=%d\n", rc);
+    }
     return section("linear layer", 1, failed);
 }
 

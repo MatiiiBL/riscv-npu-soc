@@ -75,7 +75,7 @@ int main(void) {
         sw_gemm(&op);
         uint32_t t1 = rdcycle();
         op.c = c_npu;
-        npu_busy_cycles_reset();
+        npu_counters_reset();
         uint32_t t2 = rdcycle();
         int rc = npu_gemm(&op);
         uint32_t t3 = rdcycle();

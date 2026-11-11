@@ -81,7 +81,7 @@ int main(void) {
 
     printf("mnist: %u-%u-%u INT8 MLP, %u test images, batches of %u\n", (uint32_t)MNIST_IN,
            (uint32_t)MNIST_HIDDEN, (uint32_t)MNIST_OUT, (uint32_t)MNIST_TEST_COUNT, batch);
-    npu_busy_cycles_reset();
+    npu_counters_reset();
 
     for (uint32_t first = 0; first < MNIST_TEST_COUNT; first += batch) {
         uint32_t n = MNIST_TEST_COUNT - first < batch ? MNIST_TEST_COUNT - first : batch;
