@@ -1,6 +1,12 @@
 // Verilator harness for soc_top (docs/spec.md 7).
 //
-//   soc_sim [--max-cycles N] [--commit-log FILE] [--vcd FILE] [--stats] [--quiet] program.elf
+//   soc_sim [--max-cycles N] [--commit-log FILE] [--vcd FILE] [--stats] [--quiet]
+//           [+verilator+...] program.elf
+//
+// Verilator runtime options (+verilator+rand+reset+2, +verilator+seed+N) go
+// to the model. A build with SOC_SIM_RANDOM_INIT (make -C sim RANDRESET=1)
+// starts every unreset flop and memory from random values, seed 1 unless
+// +verilator+seed+N picks another, instead of zero.
 //
 // Each loop iteration observes one clock cycle of the settled model and then
 // clocks it. Within a cycle the retirement port (WB) is handled before the
@@ -60,6 +66,7 @@ void print_usage(std::FILE *out) {
         "  --vcd FILE         write a waveform of the whole run to FILE\n"
         "  --stats            print the performance counters on stderr\n"
         "  --quiet            do not print the summary line on stderr\n"
+        "  +verilator+...     Verilator runtime option, e.g. +verilator+seed+N\n"
         "  -h, --help         show this help\n"
         "\n"
         "Exit code: 0 on SIM_EXIT = 0, else (value & 0xff) or 1 if that is 0;\n"
@@ -95,6 +102,9 @@ int parse_args(int argc, char **argv, Options &opt) {
         if (arg == "--quiet") {
             opt.quiet = true;
             continue;
+        }
+        if (arg.rfind("+verilator+", 0) == 0) {
+            continue;  // handled by VerilatedContext::commandArgs
         }
         if (arg == "--stats") {
             opt.stats = true;
@@ -214,7 +224,14 @@ int main(int argc, char **argv) {
         return rc;
     }
 
+    // Reset randomization must be set up before the model is constructed,
+    // which is when Verilator gives every variable its initial value.
     auto ctx = std::make_unique<VerilatedContext>();
+#ifdef SOC_SIM_RANDOM_INIT
+    ctx->randReset(2);
+    ctx->randSeed(1);
+#endif
+    ctx->commandArgs(argc, argv);
     auto top = std::make_unique<Vsoc_top>(ctx.get());
     if (!load_program(*ctx, opt.elf)) {
         return EXIT_USAGE;

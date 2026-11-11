@@ -5,6 +5,10 @@
 #   make build    only build the test ELFs into build/verif/core/
 #   make cli      check that soc_sim accepts and rejects the same command
 #                 lines and ELF files as the ISS (sim_cli.py)
+#   make randreset
+#                 run the riscv-tests and the firmware tests on
+#                 build/sim/soc_sim_randreset, whose unreset state starts
+#                 random, once per seed in RANDRESET_SEEDS
 #
 # Each test is a bare-metal assembly program that checks its own results and
 # reports through SIM_EXIT like the riscv-tests (0 = pass, (case << 1) | 1 =
@@ -52,7 +56,10 @@ ELFS := $(TESTS:%=$(OUT)/%.elf) $(OUT)/timing_bp1.elf $(OUT)/timing_bp0.elf
 spec = $(OUT)/$(1).elf:$(or $(EXPECT_$(1)),0):$(if $(wildcard $(1).out),$(1).out,-):$(if $(filter $(1),$(NO_DIFFTEST)),-,$(ISS)):$(or $(NONZERO_$(1)),-)
 specs = $(foreach t,$(TESTS),$(call spec,$(t)))
 
-.PHONY: all build sims run cli clean
+RANDRESET_SIM   := $(BUILD_DIR)/sim/soc_sim_randreset
+RANDRESET_SEEDS ?= 1 2 3
+
+.PHONY: all build sims run cli randreset clean
 all: run cli
 
 build: $(ELFS)
@@ -75,6 +82,19 @@ sims:
 
 cli: build sims
 	$(PYTHON) sim_cli.py $(OUT)/fwd.elf $(OUT)/sim_cli $(SIM_BP1) $(ISS)
+
+# The suites take a simulator as one command word, so each seed gets a
+# two-line wrapper that passes +verilator+seed+N.
+randreset: | $(OUT)
+	$(MAKE) -C $(REPO_ROOT)/sim RANDRESET=1
+	@for s in $(RANDRESET_SEEDS); do \
+	  w=$(OUT)/soc_sim_randreset_seed$$s; \
+	  printf '#!/bin/sh\nexec %s +verilator+seed+%s "$$@"\n' $(RANDRESET_SIM) $$s > $$w; \
+	  chmod +x $$w; \
+	  echo "== random initial state, seed $$s"; \
+	  $(MAKE) -s -C $(REPO_ROOT)/verif/riscv-tests run-rtl RTL_SIM=$$w || exit 1; \
+	  $(MAKE) -s -C $(REPO_ROOT)/sw test SIMS=$$w || exit 1; \
+	done
 
 run: build sims
 	@pass=0; fail=0; \
