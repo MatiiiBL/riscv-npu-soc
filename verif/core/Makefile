@@ -9,6 +9,10 @@
 #                 run the riscv-tests and the firmware tests on
 #                 build/sim/soc_sim_randreset, whose unreset state starts
 #                 random, once per seed in RANDRESET_SEEDS
+#   make bp-compare
+#                 run every directed test, riscv-test and firmware test on
+#                 soc_sim and soc_sim_bp0 and require identical commit logs
+#                 (only identical output for the BP_TIMED programs)
 #
 # Each test is a bare-metal assembly program that checks its own results and
 # reports through SIM_EXIT like the riscv-tests (0 = pass, (case << 1) | 1 =
@@ -59,7 +63,13 @@ specs = $(foreach t,$(TESTS),$(call spec,$(t)))
 RANDRESET_SIM   := $(BUILD_DIR)/sim/soc_sim_randreset
 RANDRESET_SEEDS ?= 1 2 3
 
-.PHONY: all build sims run cli randreset clean
+# Programs whose commit log may legitimately depend on the predictor, since
+# they read the cycle counter or poll the NPU's BUSY flag: bp-compare checks
+# only their output and exit code. timing.S, built per mode, is left out.
+BP_TIMED := csr npu_gemm npu_ksplit
+SW_TESTS := $(patsubst $(REPO_ROOT)/sw/tests/%/Makefile,%,$(wildcard $(REPO_ROOT)/sw/tests/*/Makefile))
+
+.PHONY: all build sims run cli randreset bp-compare clean
 all: run cli
 
 build: $(ELFS)
@@ -95,6 +105,14 @@ randreset: | $(OUT)
 	  $(MAKE) -s -C $(REPO_ROOT)/verif/riscv-tests run-rtl RTL_SIM=$$w || exit 1; \
 	  $(MAKE) -s -C $(REPO_ROOT)/sw test SIMS=$$w || exit 1; \
 	done
+
+bp-compare: build sims
+	$(MAKE) -C $(REPO_ROOT)/verif/riscv-tests
+	$(MAKE) -C $(REPO_ROOT)/sw
+	@sh ./bp_compare.sh $(SIM_BP1) $(SIM_BP0) $(OUT)/bp-compare "$(BP_TIMED)" \
+	  $(addprefix $(OUT)/,$(addsuffix .elf,$(TESTS))) \
+	  $$($(MAKE) -s -C $(REPO_ROOT)/verif/riscv-tests list | tr ' ' '\n' | sed 's|^|$(BUILD_DIR)/riscv-tests/|; s|$$|.elf|') \
+	  $(addprefix $(BUILD_DIR)/sw/,$(addsuffix .elf,$(SW_TESTS)))
 
 run: build sims
 	@pass=0; fail=0; \
