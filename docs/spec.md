@@ -339,15 +339,32 @@ Both `build/sim/soc_sim` (Verilator RTL) and `build/iss/iss` (ISS) accept:
 
 ```
 <sim> [--max-cycles N] [--commit-log FILE] [--quiet] program.elf
+<sim> -h | --help
 ```
 
-`soc_sim` also takes `--vcd FILE` (waveform) and `--stats` (prints the
-performance counters). `--max-cycles` counts cycles on the RTL and retired
-instructions on the ISS; the default is 100,000,000.
+`--max-cycles` takes a decimal number and counts cycles on the RTL and
+retired instructions on the ISS; the default is 100,000,000. `-h`/`--help`
+prints the usage on stdout and exits with `0`.
+
+Each simulator also takes options of its own. `--stats` exists on both but
+reports different things; the other options are usage errors (`125`) on the
+simulator that does not have them.
+
+| Option | Simulator | Meaning |
+|--------|-----------|---------|
+| `--stats` | `soc_sim` | print the performance counters on stderr: cycles, instret, load-use stalls, branches and jumps, mispredicts, divider stall cycles |
+| `--vcd FILE` | `soc_sim` | write a waveform of the whole run to FILE |
+| `+verilator+...` | `soc_sim` | a Verilator runtime option, e.g. `+verilator+seed+N` |
+| `--stats` | `iss` | print the host run time and simulation speed on stderr |
+| `--npu-arr N` | `iss` | NPU array size ARR, 1..255 (default 8, as in `soc_top`) |
+| `--npu-kmax N` | `iss` | NPU maximum inner dimension KMAX, 1..65535 (default 1024, as in `soc_top`) |
 
 - The ELF loader copies every `PT_LOAD` segment into IMEM or DMEM by physical
   address and zero-fills the rest of memory.
-- **stdout** carries exactly the bytes written to `UART_TX`, nothing else.
+- **stdout** carries exactly the bytes written to `UART_TX` by stores that
+  retired, nothing else. The RTL prints a byte when its store retires, so a
+  run that `--max-cycles` ends while the store is still in the pipeline
+  does not print it, just as the store is not in the commit log.
 - **stderr** carries diagnostics and, unless `--quiet`, one summary line:
   `[rtl] cycles=<n> instret=<n> cpi=<x.xxx> exit=<hex>` or
   `[iss] instret=<n> exit=<hex>`. `exit=` is `0x%08x` of the value written to
@@ -357,6 +374,10 @@ instructions on the ISS; the default is 100,000,000.
 - Other endings: halt on `ECALL`/`EBREAK` -> exit code `2`; illegal
   instruction -> `3`; `--max-cycles` exceeded -> `124`. Usage and ELF-load
   errors exit with `125`.
+- The serial-UART build `soc_sim_uart` (`make -C sim SERIAL_UART=1`) takes
+  stdout from its `uart_txd` line instead. If the line does not carry
+  exactly the bytes written to `UART_TX`, or a frame is malformed, it says
+  so on stderr and exits with `1` where it would otherwise exit with `0`.
 
 ### 7.2 Commit log
 

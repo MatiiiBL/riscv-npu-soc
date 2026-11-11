@@ -3,12 +3,15 @@
 
     sim_cli.py GOOD.elf WORKDIR SIM...
 
-Spec 7.1 gives both simulators one command line and one set of exit codes:
-usage and ELF-load errors exit with 125, -h/--help with 0. From a good ELF
-this crafts malformed ones (wrong type or machine, missing or truncated
-program headers, segments outside IMEM/DMEM, a 4 GiB p_memsz) and runs each
-case, plus bad command lines, on every simulator given. A case passes when
-every simulator returns the expected exit code. Each run gets a 1 GiB
+Spec 7.1 gives both simulators a common command line (--max-cycles with a
+decimal number, --commit-log, --quiet, one program) and one set of exit
+codes: usage and ELF-load errors exit with 125, -h/--help with 0. Only that
+common part is checked here; each simulator's own options (its table in
+spec 7.1) are not. From a good ELF this crafts malformed ones (wrong type or
+machine, missing or truncated program headers, segments outside IMEM/DMEM,
+a 4 GiB p_memsz) and runs each case, plus bad command lines, on every
+simulator given. A case passes when every simulator returns the expected
+exit code. Each run gets a 1 GiB
 address-space limit where the OS enforces one (Linux), so a loader that
 allocates p_memsz bytes before checking the segment aborts instead of
 exiting with 125. Exits nonzero if any case fails.
