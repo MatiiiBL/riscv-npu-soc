@@ -204,11 +204,13 @@ class NpuModel:
         out_int8 = bool(r[QUANT] & QUANT_OUT_INT8)
         relu = bool(r[QUANT] & QUANT_RELU)
         qmult = s16(r[QMULT])
+        # The bias is read once, before any C write, so C may overlap it.
+        bias = [s32(mem.read32((r[BIAS_ADDR] + 4 * n) & MASK32)) if r[BIAS_ADDR] else 0
+                for n in range(r[N])]
         for m in range(r[M]):
             row = (r[C_ADDR] + m * r[C_STRIDE]) & MASK32
             for n in range(r[N]):
-                bias = s32(mem.read32((r[BIAS_ADDR] + 4 * n) & MASK32)) if r[BIAS_ADDR] else 0
-                v = s32(self.acc[m][n] + bias)
+                v = s32(self.acc[m][n] + bias[n])
                 if out_int8:
                     p = v * qmult
                     if shift > 0:

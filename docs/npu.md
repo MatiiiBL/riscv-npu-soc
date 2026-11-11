@@ -260,6 +260,14 @@ never written. Writes leave in the same order as the spec's loop, so even
 overlapping output rows (`C_STRIDE` smaller than the row) end in the same
 state as the reference.
 
+**Overlap with the inputs.** A, B and the bias vector are all read in the
+load phase, before the first C write, so C may overlap any of them and the
+values from before the operation are used. Spec 5.1 states this for the bias
+(its write-back loop reads `bias[n]` fetched once beforehand); for A and B it
+follows from the accumulation preceding write-back. `test_overlap` writes C
+over the bias, with rows that overwrite bias words still needed by later
+rows, and over A.
+
 **Wide port.** Write-back produces one element per cycle, so it never needs
 more than 32 bits per cycle: the word is replicated into every lane of the
 block and the byte enables select its lane. A wider write-back would need
@@ -404,6 +412,7 @@ cocotb suite on each; it exits nonzero if any test fails. Options:
 | `test_requant_edges` | rounding ties, `SHIFT` 0/1/2/7/15/16/30/31, `QMULT` 1, -1, 32767, -32768, ...; saturation at both ends; `QMULT[31:16]` ignored |
 | `test_requant_random` | random products with negative and large `QMULT` |
 | `test_strides` | strides larger than the row, zero strides, overlapping output rows |
+| `test_overlap` | C written over its own bias vector (the bias is read before any C write) and over A |
 | `test_misaligned_rows` | A, B, C and bias starting at every 4-byte offset of a block, strides of every residue mod 16, K from 1 to KMAX |
 | `test_k_split` | `NO_WB`, `ACC_KEEP\|NO_WB`, `ACC_KEEP` over `K > KMAX`, against an independent reference |
 | `test_acc_keep_partial` | `ACC_KEEP` on smaller tiles leaves the other accumulators alone |

@@ -272,8 +272,10 @@ for m < M, n < N:
                                   * int8(mem8[B_ADDR + n*B_STRIDE + k])
 
 if not NO_WB:
+    for n < N:                                         # read once, before any C write
+        bias[n] = BIAS_ADDR != 0 ? int32(mem32[BIAS_ADDR + 4n]) : 0
     for m < M, n < N:
-        v = acc[m][n] + (BIAS_ADDR != 0 ? int32(mem32[BIAS_ADDR + 4n]) : 0)
+        v = acc[m][n] + bias[n]
         if OUT_INT8:
             p = int64(v) * int16(QMULT[15:0])                     # exact, 48 bits
             if SHIFT > 0: p = (p + (1 << (SHIFT - 1))) >> SHIFT    # arithmetic shift
@@ -289,7 +291,8 @@ CYCLES = cycles elapsed; BUSY = 0; DONE = 1
 The NPU only writes the bytes of C it produces (byte enables on partial
 words). Rows of A and B, and the bias vector, are read as the aligned
 `DMA_BYTES` blocks that cover them; the other bytes of those blocks are
-ignored. Software must not write memory the NPU reads, or
+ignored. C may overlap the bias vector: the bias values from before the
+operation are used. Software must not write memory the NPU reads, or
 read memory it writes, while `BUSY` is set.
 
 The ISS executes an operation instantly at the `START` write (it never

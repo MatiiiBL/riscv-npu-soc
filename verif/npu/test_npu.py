@@ -502,6 +502,36 @@ async def test_strides(dut):
 
 
 @cocotb.test()
+async def test_overlap(dut):
+    """C written over its own bias vector or over A: pre-operation values are used."""
+    tb = await Testbench.create(dut, "overlap")
+    # C row 0 lands on the bias, so row 1 must still see the original bias.
+    m, n, k = min(2, ARR), min(2, ARR), min(4, KMAX)
+    a = np.array([[1, 0, 0, 0], [2, 0, 0, 0]], dtype=np.int64)[:m, :k]
+    b = np.array([[1, 0, 0, 0], [1, 0, 0, 0]], dtype=np.int64)[:n, :k]
+    bias = np.array([100, 200], dtype=np.int64)[:n]
+    await tb.run_op(Op(a=a, b=b, bias=bias, bias_addr=BIAS_REGION, c_addr=BIAS_REGION,
+                       c_stride=4 * n))
+    want = [[101, 201], [102, 202]]
+    for i in range(m):
+        for j in range(n):
+            got = s32(tb.mem.read32(BIAS_REGION + 4 * (n * i + j)))
+            assert got == want[i][j], f"C[{i}][{j}] = {got}, want {want[i][j]}"
+
+    k = min(40, KMAX)
+    for out_int8 in (False, True):
+        # Full tiles with C rows one word apart over the bias: every row after
+        # the first is written over bias words that earlier rows changed.
+        await tb.run_op(Op(a=tb.matrix(ARR, k), b=tb.matrix(ARR, k),
+                           bias=tb.np_rng.integers(-1 << 20, 1 << 20, size=ARR, dtype=np.int64),
+                           bias_addr=BIAS_REGION + 64, c_addr=BIAS_REGION + 60, c_stride=4,
+                           quant=quant(8, out_int8)))
+        # C written over the rows of A it was computed from.
+        await tb.run_op(Op(a=tb.matrix(ARR, k), b=tb.matrix(ARR, k), c_addr=A_REGION,
+                           c_stride=round4(k), quant=quant(8, out_int8)))
+
+
+@cocotb.test()
 async def test_misaligned_rows(dut):
     """Rows starting at every 4-byte offset of a DMA block, strides that shift it."""
     tb = await Testbench.create(dut, "misaligned")
