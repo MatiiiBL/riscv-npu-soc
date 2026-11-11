@@ -17,8 +17,9 @@ Measured on the RTL (Verilator, cycle-accurate), with times at the 40 MHz FPGA c
   (98.06% in floating point).
 - **Matrix multiply runs 30-100x faster** than an optimized software loop on the same core.
   The NPU sustains up to **58.9 of its 64 MACs per cycle** on a full tile.
-- **The CPU scores 2.86 CoreMark/MHz (114 CoreMark/s at 40 MHz).** It has full forwarding
-  and a BTB + 2-bit branch predictor, which mispredicts 9.7% of CoreMark's branches.
+- **The CPU scores 2.86 CoreMark/MHz (114 CoreMark/s at 40 MHz).** It forwards ALU
+  results and predicts branches with a BTB and 2-bit counters, which mispredict 9.7% of
+  CoreMark's branches.
 - **Timing closure took the FPGA clock from 25 to 40 MHz** (Fmax 42-46.5 MHz over 8
   place-and-route seeds). That traded 15% CPI for a 1.6x clock, a net **1.39x faster on
   CoreMark and 1.59x on MNIST**.

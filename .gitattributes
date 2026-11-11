@@ -1,0 +1,7 @@
+# Written by models/mnist/export.py: keep the weight and test-image tables
+# out of diffs and out of the repository's language statistics.
+sw/bench/mnist/model.h    linguist-generated=true
+sw/bench/mnist/testset.h  linguist-generated=true
+
+# Verilator file lists (*.f) are not Fortran.
+*.f linguist-detectable=false
