@@ -2,7 +2,6 @@
 #
 # Each job checks out the repository, installs only what it needs through
 # .github/actions/setup, and runs the same make targets as a local checkout.
-# Jobs for blocks that are not in the tree yet skip their steps with a notice.
 
 name: CI
 
@@ -39,11 +38,19 @@ jobs:
           "$CXX" --version | head -n 1
           make -j"$(nproc)" iss
       - name: ISS unit tests
-        run: make -C tools/iss test
+        run: make test-iss
       - name: riscv-tests on the ISS
         run: make -j"$(nproc)" test-isa-iss
+      - name: riscv-tests refuse to run without the submodule
+        run: |
+          if make -C verif/riscv-tests list SUITE_DIR="$RUNNER_TEMP/no-submodule" > "$RUNNER_TEMP/rt.log" 2>&1; then
+            echo "::error::verif/riscv-tests ran without its test sources"; exit 1
+          fi
+          grep "git submodule update" "$RUNNER_TEMP/rt.log"
       - name: Firmware tests on the ISS
         run: make -j"$(nproc)" -C sw test SIMS=build/iss/iss
+      - name: NPU firmware tests with ARR = 4, 5, 6
+        run: make -j"$(nproc)" test-sw-arr
       - name: Random difftest, ISS against itself
         run: make -C verif/random -j"$(nproc)" SEEDS=100 LEN=2000 RTL_SIM=build/iss/iss
       - name: difftest self-test
@@ -80,9 +87,9 @@ jobs:
           path: build/npu/**/results.xml
           if-no-files-found: ignore
 
-  # Tests that need the Verilator SoC model (sim/). A new test is one matrix
-  # entry: a name, the make arguments, and the files it needs. Until those
-  # files are in the tree, the entry's steps are skipped with a notice.
+  # Tests against the Verilator SoC model (sim/), in its default build
+  # (BP_MODE=1, 16-byte NPU DMA port) and in the variants whose behavior must
+  # not differ. A new test is one matrix entry: a name and its commands.
   rtl:
     name: RTL (${{ matrix.name }})
     runs-on: ubuntu-24.04
@@ -91,42 +98,38 @@ jobs:
       matrix:
         include:
           - name: riscv-tests
-            make: test-isa-rtl
-            needs: sim/Makefile
+            run: make -j"$(nproc)" test-isa-rtl
+          - name: riscv-tests, BP_MODE=0
+            run: |
+              make -j"$(nproc)" -C sim BP_MODE=0
+              make -j"$(nproc)" -C verif/riscv-tests run-rtl RTL_SIM="$PWD/build/sim/soc_sim_bp0"
           - name: directed core tests
-            make: -C verif/core
-            needs: sim/Makefile verif/core/Makefile
+            run: make -j"$(nproc)" test-core
           - name: firmware
-            make: test-sw
-            needs: sim/Makefile
+            run: make -j"$(nproc)" test-sw
+          - name: firmware, NPU_DMA_BYTES=4
+            run: |
+              make -j"$(nproc)" -C sim NPU_DMA_BYTES=4
+              make -j"$(nproc)" -C sw test SIMS=build/sim/soc_sim_dma4
           - name: random difftest
-            make: test-random
-            needs: sim/Makefile
+            run: make -j"$(nproc)" test-random
+          - name: random difftest, BP_MODE=0
+            run: |
+              make -j"$(nproc)" iss
+              make -j"$(nproc)" -C sim BP_MODE=0
+              make -j"$(nproc)" -C verif/random RTL_SIM=build/sim/soc_sim_bp0
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: true
-      - name: Check that the tested blocks exist
-        id: guard
-        run: |
-          for f in ${{ matrix.needs }}; do
-            if [ ! -f "$f" ]; then
-              echo "run=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::$f is not in this tree yet, so '${{ matrix.name }}' is skipped"
-              exit 0
-            fi
-          done
-          echo "run=true" >> "$GITHUB_OUTPUT"
-      - if: steps.guard.outputs.run == 'true'
-        uses: ./.github/actions/setup
+      - uses: ./.github/actions/setup
         with:
           firmware: true
           hdl: true
-      - name: make ${{ matrix.make }}
-        if: steps.guard.outputs.run == 'true'
-        run: make -j"$(nproc)" ${{ matrix.make }}
+      - name: Test
+        run: ${{ matrix.run }}
       - name: Keep failing cases
-        if: failure() && steps.guard.outputs.run == 'true'
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: rtl-${{ strategy.job-index }}-failures
