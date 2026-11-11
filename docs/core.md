@@ -18,7 +18,7 @@ says *what* the hardware must do; this file explains *how* and *why*.
 | `rtl/soc/bram_sp.sv`, `bram_tdp.sv` | inferable single-port ROM and true dual-port RAM |
 | `rtl/soc/soc_bus.sv` | address decoder for the CPU data port and the NPU DMA port |
 | `rtl/soc/soc_mmio.sv`, `uart_tx.sv` | UART, SIM_EXIT, LEDS |
-| `rtl/soc/npu_stub.sv` | placeholder `npu_top` until the real NPU is integrated |
+| `rtl/npu/` | `npu_top`, the systolic-array accelerator (see `docs/npu.md`) |
 
 ## 1. Pipeline
 
@@ -309,10 +309,9 @@ simulation build (`SIM = 1`) `UART_STATUS` reads 1 unconditionally, and the
 harness takes bytes and the exit value from the write strobes
 (`sim_uart_*`, `sim_exit_*`).
 
-**NPU slot**: `npu_stub.sv` provides an `npu_top` with the spec ports whose
-registers are plain storage, `INFO` and `CYCLES` read 0, and `START` sets
-`DONE | ERR` at once with no DMA. `soc.f` lists it until the real NPU
-(`rtl/npu/npu.f`) replaces it.
+**NPU**: `soc_top` instantiates `npu_top` (`rtl/npu/`, pulled in by
+`soc.f` through `-F ../npu/npu.f`); its register port hangs off the decoder
+and its DMA master owns DMEM port B, so NPU traffic never stalls the core.
 
 ## 7. Simulator
 
@@ -334,7 +333,7 @@ in the cycle after the halting instruction retires; ECALL/EBREAK and
 illegal instructions are told apart by the retired instruction word.
 
 Measured on an Apple M4 laptop (one thread): 11-16 M cycles/s for a
-load/store/branch loop with the NPU stub (variation from machine load),
+load/store/branch loop with a register-only NPU model (variation from machine load),
 about 7 M cycles/s on CoreMark and MNIST with the real NPU in the model,
 and about 4 M cycles/s while writing a commit log.
 

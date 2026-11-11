@@ -8,7 +8,3 @@ lint_off -rule UNUSEDPARAM -file "*rv32_pkg.sv"
 // FPGA or from the simulator's ELF loader, so with no INIT_FILE nothing in
 // the RTL drives it.
 lint_off -rule UNDRIVEN -file "*bram_sp.sv" -match "*'mem'*"
-
-// The NPU stub must be called npu_top to drop into the real block's slot,
-// but lives in its own file so it cannot be confused with rtl/npu/npu_top.sv.
-lint_off -rule DECLFILENAME -file "*npu_stub.sv"
