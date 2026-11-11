@@ -244,8 +244,9 @@ difftest FAIL: build/random/selftest.elf
 
 ## 5. NPU unit tests
 
-`verif/npu/` runs cocotb tests of `npu_top` on Verilator, for `ARR = 8` and
-`ARR = 4` (`make test-npu`; see `docs/npu.md` section 7 for the full list). The
+`verif/npu/` runs cocotb tests of `npu_top` on Verilator, for `ARR = 8` with
+4-, 8- and 16-byte DMA ports and for `ARR = 4` with a 16-byte port
+(`make test-npu`; see `docs/npu.md` section 7 for the full list). The
 reference is `verif/npu/npu_model.py`, a Python transcription of the spec 5.1
 pseudocode that shares no code with the RTL. The testbench checks the whole
 DMEM image after every operation, plus `STATUS`, `irq`, `CYCLES` and the exact

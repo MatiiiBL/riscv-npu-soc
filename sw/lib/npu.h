@@ -20,16 +20,6 @@
 #define NPU_OK    0
 #define NPU_ERROR (-1)
 
-/* Operand reuse: skip reloading A (or B) if the previous command loaded the
- * same rows (same address, stride, row count and K). Results never change;
- * the caller must not have modified those rows in between. */
-#ifndef NPU_CTRL_B_KEEP
-#define NPU_CTRL_B_KEEP (1u << 3)
-#endif
-#ifndef NPU_CTRL_A_KEEP
-#define NPU_CTRL_A_KEEP (1u << 4)
-#endif
-
 typedef struct {
     uint32_t arr;     /* the array is arr x arr processing elements */
     uint32_t kmax;    /* longest K a single command accepts         */
