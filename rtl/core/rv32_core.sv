@@ -230,8 +230,10 @@ module rv32_core #(
   );
 
   // Branch and JAL targets do not depend on registers, so they are computed
-  // here, as is the check of the predicted target, keeping both off the EX
-  // critical path.
+  // here, off the EX critical path. Their comparison with the predicted
+  // target waits for EX (tgt_ok_x), where it works from registers in
+  // parallel with the longer branch comparison; here it would sit behind
+  // the instruction decode on the path from IMEM.
   assign tgt_d = pc_d + imm_d;
 
   // ID/EX
@@ -249,7 +251,6 @@ module rv32_core #(
   logic               bp_hit_x;
   logic [1:0]         bp_ctr_x;
   logic [31:0]        bp_tgt_x;
-  logic               tgt_ok_x;      // predicted target equals tgt_x
 
   // The data hazards forwarding cannot cover, where the instruction in ID
   // reads the result of
@@ -308,7 +309,6 @@ module rv32_core #(
       bp_hit_x     <= bp_hit_d;
       bp_ctr_x     <= bp_ctr_d;
       bp_tgt_x     <= bp_tgt_d;
-      tgt_ok_x     <= (bp_tgt_d == tgt_d);
     end
   end
 
@@ -325,7 +325,7 @@ module rv32_core #(
   logic [31:0] link_x, jalr_tgt_x, act_tgt_x, csr_y_x, mul_y_m, div_y_x, res_x;
   logic        div_done_x;
   logic        cmp_eq_x, cmp_lt_x, cmp_ltu_x, cond_x;
-  logic        taken_x, tgt_match_x;
+  logic        taken_x, tgt_ok_x, tgt_match_x;
 
   // Both forwards come from pipeline registers. The interlocks guarantee
   // that the MEM-stage result is never a load's data or a product, and that
@@ -392,6 +392,7 @@ module rv32_core #(
   assign jalr_tgt_x   = {alu_y_x[31:1], 1'b0};
   assign act_tgt_x    = is_jalr_x ? jalr_tgt_x : tgt_x;
   assign taken_x      = is_jal_x || is_jalr_x || (is_branch_x && cond_x);
+  assign tgt_ok_x     = (bp_tgt_x == tgt_x);
   assign tgt_match_x  = is_jalr_x ? (bp_tgt_x == jalr_tgt_x) : tgt_ok_x;
 
   // Comparing against the predicted next PC for every instruction (not only

@@ -46,10 +46,15 @@ module rv32_bpred #(
     localparam int IDX_W = $clog2(BTB_ENTRIES);
     localparam int TAG_W = 30 - IDX_W;
 
-    logic [BTB_ENTRIES-1:0] valid;
-    logic [TAG_W-1:0]       tag_mem [BTB_ENTRIES];
-    logic [29:0]            tgt_mem [BTB_ENTRIES];
-    logic [1:0]             ctr_mem [BTB_ENTRIES];
+    // The arrays are read asynchronously from if_pc, so on the FPGA they go
+    // in LUT RAM. A block RAM would need a registered read address, which
+    // Yosys gets by moving pc_f into the RAM: the whole next-PC selection,
+    // including the late stall and redirect, would then end at the RAM's
+    // address pins instead of at pc_f.
+    logic [BTB_ENTRIES-1:0]                        valid;
+    (* ram_style = "distributed" *) logic [TAG_W-1:0] tag_mem [BTB_ENTRIES];
+    (* ram_style = "distributed" *) logic [29:0]      tgt_mem [BTB_ENTRIES];
+    logic [1:0]                                    ctr_mem [BTB_ENTRIES];
 
     logic [IDX_W-1:0] rd_idx, wr_idx;
     logic             wr_en;
