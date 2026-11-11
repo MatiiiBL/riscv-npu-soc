@@ -1,0 +1,18 @@
+printf: conversions, flags and widths
+[0 42 -42] ok
+[2147483647 -2147483648] ok
+[4294967295 0] ok
+[deadbeef DEADBEEF 0] ok
+[   42|00042|-0042|  -42] ok
+[12345|7] ok
+[0000abcd|    ab] ok
+[123 456 789] ok
+[A|z|!] ok
+[pulse|   pulse|pulse|] ok
+[0x10000000 0x00000000] ok
+[100%] ok
+[[7|seven|7|0x7]] ok
+[abcd] ok
+[#] ok
+printf returned 16
+PASS

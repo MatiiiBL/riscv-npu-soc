@@ -1,0 +1,8 @@
+crc32: bitwise and table-driven CRC-32 / CRC-32C
+"": crc32 00000000 crc32c 00000000 ok
+"a": crc32 e8b7be43 crc32c c1d04330 ok
+"123456789": crc32 cbf43926 crc32c e3069283 ok
+"The quick brown fox jumps over the lazy dog": crc32 414fa339 crc32c 22620404 ok
+4 KiB random, crc32 : f4f900d5 ok
+4 KiB random, crc32c: 514ac067 ok
+PASS

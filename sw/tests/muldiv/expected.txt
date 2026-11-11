@@ -1,0 +1,12 @@
+muldiv: M extension vs shift-and-add / restoring-division reference
+mul: 256 corner pairs + 500 random: ok
+mulh: 256 corner pairs + 500 random: ok
+mulhsu: 256 corner pairs + 500 random: ok
+mulhu: 256 corner pairs + 500 random: ok
+div: 256 corner pairs + 500 random: ok
+divu: 256 corner pairs + 500 random: ok
+rem: 256 corner pairs + 500 random: ok
+remu: 256 corner pairs + 500 random: ok
+ISA corner cases: 16: ok
+dependent chains: 498: ok
+PASS

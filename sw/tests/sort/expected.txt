@@ -1,0 +1,8 @@
+sort: quicksort and merge sort vs insertion sort
+random   n=600: ok
+sorted   n=600: ok
+reversed n=600: ok
+constant n=600: ok
+few      n=600: ok
+lengths  n=33: ok
+PASS

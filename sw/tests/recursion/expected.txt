@@ -1,0 +1,11 @@
+recursion: fib, ackermann, hanoi, expression parser
+fib(0..20) == iterative = 1 ok
+fib(24) = 46368 ok
+ackermann(2, 3) = 9 ok
+ackermann(3, 4) = 125 ok
+hanoi(12) moves = 4095 ok
+hanoi(12) discs on target peg = 12 ok
+(2+3)*(7-4) = 15 ok
+100/7/2-3*-4 = 19 ok
+((((1+2)*3)-4)*5)/-3 = -8 ok
+PASS

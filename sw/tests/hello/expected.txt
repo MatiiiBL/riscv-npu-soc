@@ -1,0 +1,2 @@
+Hello from Pulse!
+sum of squares 1..100 = 338350
