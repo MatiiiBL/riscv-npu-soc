@@ -73,6 +73,7 @@ module rv32_core #(
   // IF
   // ======================================================================
   logic [31:0] pc_f, npc_f;
+  logic        pred_taken_f;
   logic        bp_hit_f;
   logic [1:0]  bp_ctr_f;
   logic [31:0] bp_tgt_f;
@@ -102,13 +103,17 @@ module rv32_core #(
     .upd_old_target (bp_upd_old_target)
   );
 
-  assign npc_f     = (bp_hit_f && bp_ctr_f[1]) ? bp_tgt_f : pc_f + 32'd4;
+  // The fetch decision itself travels down the pipe, so EX checks exactly
+  // what IF did rather than re-deriving it from the counter.
+  assign pred_taken_f = bp_hit_f && bp_ctr_f[1];
+  assign npc_f        = pred_taken_f ? bp_tgt_f : pc_f + 32'd4;
   assign imem_req  = !stall_d && !halt_q;
   assign imem_addr = pc_f;
 
   // IF/ID. The instruction word itself is imem_rdata.
   logic        valid_d;
   logic [31:0] pc_d;
+  logic        pred_taken_d;
   logic        bp_hit_d;
   logic [1:0]  bp_ctr_d;
   logic [31:0] bp_tgt_d;
@@ -130,10 +135,11 @@ module rv32_core #(
 
   always_ff @(posedge clk) begin
     if (!stall_d) begin
-      pc_d     <= pc_f;
-      bp_hit_d <= bp_hit_f;
-      bp_ctr_d <= bp_ctr_f;
-      bp_tgt_d <= bp_tgt_f;
+      pc_d         <= pc_f;
+      pred_taken_d <= pred_taken_f;
+      bp_hit_d     <= bp_hit_f;
+      bp_ctr_d     <= bp_ctr_f;
+      bp_tgt_d     <= bp_tgt_f;
     end
   end
 
@@ -209,6 +215,7 @@ module rv32_core #(
   rv32_pkg::res_sel_e res_sel_x;
   logic               is_branch_x, is_jal_x, is_jalr_x, is_load_x, is_store_x;
   logic               is_div_x, is_halt_x;
+  logic               pred_taken_x;
   logic               bp_hit_x;
   logic [1:0]         bp_ctr_x;
   logic [31:0]        bp_tgt_x;
@@ -230,31 +237,32 @@ module rv32_core #(
 
   always_ff @(posedge clk) begin
     if (!div_stall) begin
-      pc_x        <= pc_d;
-      insn_x      <= insn_d;
-      imm_x       <= imm_d;
-      tgt_x       <= tgt_d;
-      rs1_x       <= rs1_d;
-      rs2_x       <= rs2_d;
-      rs1_val_x   <= rs1_val_d;
-      rs2_val_x   <= rs2_val_d;
-      rd_x        <= rd_d;
-      rd_we_x     <= rd_we_d;
-      alu_op_x    <= alu_op_d;
-      opa_sel_x   <= opa_sel_d;
-      opb_imm_x   <= opb_imm_d;
-      res_sel_x   <= res_sel_d;
-      is_branch_x <= is_branch_d;
-      is_jal_x    <= is_jal_d;
-      is_jalr_x   <= is_jalr_d;
-      is_load_x   <= is_load_d;
-      is_store_x  <= is_store_d;
-      is_div_x    <= is_div_d;
-      is_halt_x   <= is_halt_d;
-      bp_hit_x    <= bp_hit_d;
-      bp_ctr_x    <= bp_ctr_d;
-      bp_tgt_x    <= bp_tgt_d;
-      tgt_ok_x    <= (bp_tgt_d == tgt_d);
+      pc_x         <= pc_d;
+      insn_x       <= insn_d;
+      imm_x        <= imm_d;
+      tgt_x        <= tgt_d;
+      rs1_x        <= rs1_d;
+      rs2_x        <= rs2_d;
+      rs1_val_x    <= rs1_val_d;
+      rs2_val_x    <= rs2_val_d;
+      rd_x         <= rd_d;
+      rd_we_x      <= rd_we_d;
+      alu_op_x     <= alu_op_d;
+      opa_sel_x    <= opa_sel_d;
+      opb_imm_x    <= opb_imm_d;
+      res_sel_x    <= res_sel_d;
+      is_branch_x  <= is_branch_d;
+      is_jal_x     <= is_jal_d;
+      is_jalr_x    <= is_jalr_d;
+      is_load_x    <= is_load_d;
+      is_store_x   <= is_store_d;
+      is_div_x     <= is_div_d;
+      is_halt_x    <= is_halt_d;
+      pred_taken_x <= pred_taken_d;
+      bp_hit_x     <= bp_hit_d;
+      bp_ctr_x     <= bp_ctr_d;
+      bp_tgt_x     <= bp_tgt_d;
+      tgt_ok_x     <= (bp_tgt_d == tgt_d);
     end
   end
 
@@ -271,7 +279,7 @@ module rv32_core #(
   logic [31:0] link_x, jalr_tgt_x, act_tgt_x, csr_y_x, mul_y_x, div_y_x, res_x;
   logic        div_done_x;
   logic        cmp_eq_x, cmp_lt_x, cmp_ltu_x, cond_x;
-  logic        taken_x, pred_taken_x, tgt_match_x;
+  logic        taken_x, tgt_match_x;
 
   // The MEM-stage result is never a load's data here: lu_hazard guarantees
   // a consumer of a load is still in ID while the load is in MEM.
@@ -336,7 +344,6 @@ module rv32_core #(
   assign jalr_tgt_x   = {alu_y_x[31:1], 1'b0};
   assign act_tgt_x    = is_jalr_x ? jalr_tgt_x : tgt_x;
   assign taken_x      = is_jal_x || is_jalr_x || (is_branch_x && cond_x);
-  assign pred_taken_x = bp_hit_x && bp_ctr_x[1];
   assign tgt_match_x  = is_jalr_x ? (bp_tgt_x == jalr_tgt_x) : tgt_ok_x;
 
   // Comparing against the predicted next PC for every instruction (not only
