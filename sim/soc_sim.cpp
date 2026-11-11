@@ -103,8 +103,8 @@ Options parse_args(int argc, char **argv) {
 
 // Returns the 32-bit word array `var` of the instance `scope`, made visible by
 // sim/sim.vlt; a model without it is a build error. Looking arrays up by
-// hierarchical name keeps the harness independent of Verilator's internal
-// member names.
+// name keeps the harness independent of how many DMEM banks the model was
+// built with and of Verilator's internal member names.
 uint32_t *find_words(const VerilatedContext &ctx, const std::string &scope, const char *var,
                      size_t words) {
     const VerilatedScope *s = ctx.scopeFind(scope.c_str());
@@ -118,7 +118,8 @@ uint32_t *find_words(const VerilatedContext &ctx, const std::string &scope, cons
 }
 
 // Copies the ELF image into the IMEM and DMEM arrays of the model; every
-// word not covered by a segment is zero.
+// word not covered by a segment is zero. DMEM word w lives in bank
+// w mod banks at row w / banks (rtl/soc/soc_dmem.sv).
 bool load_program(const VerilatedContext &ctx, const char *path) {
     std::vector<ElfSegment> segments;
     std::string error;
@@ -155,9 +156,23 @@ bool load_program(const VerilatedContext &ctx, const char *path) {
                (static_cast<uint32_t>(m[4 * i + 2]) << 16) |
                (static_cast<uint32_t>(m[4 * i + 3]) << 24);
     };
-    uint32_t *dmem_words = find_words(ctx, "TOP.soc_top.u_dmem", "mem", DMEM_SIZE / 4);
-    for (size_t i = 0; i < DMEM_SIZE / 4; i++) {
-        dmem_words[i] = word(dmem, i);
+    auto bank_scope = [](size_t b) {
+        return "TOP.soc_top.u_dmem.g_bank[" + std::to_string(b) + "].u_ram";
+    };
+    size_t banks = 0;
+    while (ctx.scopeFind(bank_scope(banks).c_str()) != nullptr) {
+        banks++;
+    }
+    if (banks == 0 || (DMEM_SIZE / 4) % banks != 0) {
+        std::fprintf(stderr, "soc_sim: cannot find the DMEM banks in the model\n");
+        return false;
+    }
+    const size_t rows = DMEM_SIZE / 4 / banks;
+    for (size_t b = 0; b < banks; b++) {
+        uint32_t *bank = find_words(ctx, bank_scope(b), "mem", rows);
+        for (size_t r = 0; r < rows; r++) {
+            bank[r] = word(dmem, r * banks + b);
+        }
     }
 
     uint32_t *imem_words = find_words(ctx, "TOP.soc_top.u_imem", "mem", IMEM_SIZE / 4);

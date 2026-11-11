@@ -1,10 +1,14 @@
 // Pulse SoC top level (docs/spec.md 1 and 3).
 //
 //   rv32_core --imem--> IMEM 64 KiB (single-port block RAM)
-//             --dmem--> soc_bus --+--> DMEM 256 KiB port A (true dual-port block RAM)
+//             --dmem--> soc_bus --+--> DMEM 256 KiB port A, 32 bits
 //                                 +--> soc_mmio (UART, SIM_EXIT, LEDS)
 //                                 +--> npu_top registers
-//   npu_top DMA --------> soc_bus ----> DMEM port B
+//   npu_top DMA --------> soc_bus ----> DMEM port B, NPU_DMA_BYTES wide
+//
+// DMEM (soc_dmem) is NPU_DMA_BYTES / 4 word-interleaved banks of true
+// dual-port block RAM, so the NPU moves one aligned NPU_DMA_BYTES block per
+// cycle while the CPU still sees a plain 32-bit memory.
 //
 // The sim_* outputs, the retirement port and the performance counters exist
 // for the Verilator harness; an FPGA wrapper leaves them unconnected.
@@ -13,7 +17,11 @@ module soc_top #(
   parameter int BTB_ENTRIES = 64,
   parameter int UART_DIV    = 217,    // clocks per UART bit (25 MHz / 115200 baud)
   parameter bit SIM         = 1'b0,   // UART_STATUS always reads ready
-  parameter     IMEM_INIT   = "",     // $readmemh images for the FPGA build
+  parameter int NPU_DMA_BYTES = 16,   // NPU DMA port width: 4, 8 or 16 bytes
+  // $readmemh images for the FPGA build (tools/elf2hex.py). IMEM_INIT is one
+  // file; DMEM_INIT is a path prefix, and DMEM bank b loads
+  // <DMEM_INIT><b>.hex (elf2hex --dmem-banks NPU_DMA_BYTES/4).
+  parameter     IMEM_INIT   = "",
   parameter     DMEM_INIT   = ""
 ) (
   input  logic        clk,
@@ -48,8 +56,14 @@ module soc_top #(
 
   localparam int IMEM_WORDS = 16384;   // 64 KiB
   localparam int DMEM_WORDS = 65536;   // 256 KiB
+  localparam int DMEM_BANKS = NPU_DMA_BYTES / 4;
   localparam int IMEM_AW    = $clog2(IMEM_WORDS);
   localparam int DMEM_AW    = $clog2(DMEM_WORDS);
+  localparam int BLOCK_AW   = $clog2(DMEM_WORDS / DMEM_BANKS);
+
+  if (NPU_DMA_BYTES != 4 && NPU_DMA_BYTES != 8 && NPU_DMA_BYTES != 16) begin : g_bad_dma_bytes
+    $error("soc_top: NPU_DMA_BYTES must be 4, 8 or 16");
+  end
 
   // ------------------------------------------------------------------ core
   logic        imem_req;
@@ -103,14 +117,20 @@ module soc_top #(
   );
 
   // ---------------------------------------------------------- interconnect
-  logic                dma_req, dma_we;
-  logic [31:0]         dma_addr, dma_wdata, dma_rdata;
-  logic [3:0]          dma_be;
+  logic                     dma_req, dma_we;
+  logic [31:0]              dma_addr;
+  logic [NPU_DMA_BYTES-1:0] dma_be;
+  logic [8*NPU_DMA_BYTES-1:0] dma_wdata, dma_rdata;
 
-  logic                dmem_a_en, dmem_a_we, dmem_b_en, dmem_b_we;
-  logic [3:0]          dmem_a_be, dmem_b_be;
-  logic [DMEM_AW-1:0]  dmem_a_addr, dmem_b_addr;
-  logic [31:0]         dmem_a_wdata, dmem_a_rdata, dmem_b_wdata, dmem_b_rdata;
+  logic                     dmem_a_en, dmem_a_we;
+  logic [3:0]               dmem_a_be;
+  logic [DMEM_AW-1:0]       dmem_a_addr;
+  logic [31:0]              dmem_a_wdata, dmem_a_rdata;
+
+  logic                     dmem_b_en, dmem_b_we;
+  logic [NPU_DMA_BYTES-1:0] dmem_b_be;
+  logic [BLOCK_AW-1:0]      dmem_b_addr;
+  logic [8*NPU_DMA_BYTES-1:0] dmem_b_wdata, dmem_b_rdata;
 
   logic                mmio_req, mmio_we;
   logic [11:0]         mmio_addr;
@@ -122,7 +142,8 @@ module soc_top #(
   logic [31:0]         npu_wdata, npu_rdata;
 
   soc_bus #(
-    .DMEM_WORDS (DMEM_WORDS)
+    .DMEM_WORDS (DMEM_WORDS),
+    .DMA_BYTES  (NPU_DMA_BYTES)
   ) u_bus (
     .clk          (clk),
     .rst_n        (rst_n),
@@ -164,8 +185,9 @@ module soc_top #(
   );
 
   // ------------------------------------------------------------------ DMEM
-  bram_tdp #(
+  soc_dmem #(
     .WORDS     (DMEM_WORDS),
+    .BANKS     (DMEM_BANKS),
     .INIT_FILE (DMEM_INIT)
   ) u_dmem (
     .clk     (clk),
@@ -208,7 +230,9 @@ module soc_top #(
   // irq is not wired to the core (no interrupts); software polls STATUS.
   logic npu_irq;
 
-  npu_top u_npu (
+  npu_top #(
+    .DMA_BYTES (NPU_DMA_BYTES)
+  ) u_npu (
     .clk       (clk),
     .rst_n     (rst_n),
     .cfg_req   (npu_req),

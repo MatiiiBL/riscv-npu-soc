@@ -26,8 +26,11 @@ lint-soc:
 # as the IMEM/DMEM init images, then the cell statistics. An image is needed
 # because an uninitialised instruction ROM is undefined, and Yosys would
 # optimise away everything that depends on fetched instructions.
-SYNTH_DIR := $(BUILD_DIR)/synth-check
-SYNTH_ELF ?= $(BUILD_DIR)/sw/hello.elf
+# NPU_DMA_BYTES selects the NPU port width (4, 8 or 16); DMEM then has
+# NPU_DMA_BYTES / 4 banks, each loading its own image dmem<b>.hex.
+SYNTH_DIR     := $(BUILD_DIR)/synth-check
+SYNTH_ELF     ?= $(BUILD_DIR)/sw/hello.elf
+NPU_DMA_BYTES ?= 16
 
 # Expands a Verilator -F file list into plain paths, following nested -F.
 EXPAND_F = expand() { local d; d=$$(dirname $$1); while read -r a b; do \
@@ -38,9 +41,11 @@ EXPAND_F = expand() { local d; d=$$(dirname $$1); while read -r a b; do \
 synth-check:
 	$(MAKE) -C ../sw
 	@mkdir -p $(SYNTH_DIR)
-	$(PYTHON) ../tools/elf2hex.py $(SYNTH_ELF) --imem $(SYNTH_DIR)/imem.hex --dmem $(SYNTH_DIR)/dmem.hex
+	$(PYTHON) ../tools/elf2hex.py $(SYNTH_ELF) --imem $(SYNTH_DIR)/imem.hex \
+	  --dmem $(SYNTH_DIR)/dmem --dmem-banks $$(( $(NPU_DMA_BYTES) / 4 ))
 	@$(EXPAND_F); \
 	$(YOSYS) -q -l $(SYNTH_DIR)/yosys.log -p "read_verilog -sv $$(expand soc/soc.f | tr '\n' ' '); \
-	  chparam -set IMEM_INIT \"$(SYNTH_DIR)/imem.hex\" -set DMEM_INIT \"$(SYNTH_DIR)/dmem.hex\" soc_top; \
+	  chparam -set IMEM_INIT \"$(SYNTH_DIR)/imem.hex\" -set DMEM_INIT \"$(SYNTH_DIR)/dmem\" \
+	    -set NPU_DMA_BYTES $(NPU_DMA_BYTES) soc_top; \
 	  synth_ecp5 -top soc_top; tee -q -o $(SYNTH_DIR)/stat.txt stat"
 	@grep -E '^ +[0-9]+ +(LUT4|TRELLIS_FF|TRELLIS_DPR16X4|CCU2C|DP16KD|PDPW16KD|MULT18X18D)$$' $(SYNTH_DIR)/stat.txt

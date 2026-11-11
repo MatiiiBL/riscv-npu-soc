@@ -2,12 +2,19 @@
 """Convert a Pulse firmware ELF into $readmemh images for IMEM and DMEM.
 
 The images initialise the block RAMs of the FPGA build through the IMEM_INIT
-and DMEM_INIT parameters of soc_top. Each file holds the whole memory, one
-32-bit little-endian word per line as 8 hex digits, with every word that no
-PT_LOAD segment covers set to zero: the same image the simulators build
-(docs/spec.md section 7.1).
+and DMEM_INIT parameters of soc_top. Every file has one 32-bit little-endian
+word per line as 8 hex digits, and every word that no PT_LOAD segment covers
+is zero: the same contents the simulators load (docs/spec.md section 7.1).
 
-    tools/elf2hex.py build/sw/hello.elf --imem imem.hex --dmem dmem.hex
+IMEM is one file. DMEM is split into word-interleaved banks like the RTL
+(rtl/soc/soc_dmem.sv): with --dmem PREFIX --dmem-banks N, bank b is written
+to PREFIX<b>.hex and holds DMEM words b, b + N, b + 2N, ..., which is the
+file soc_top's bank b loads for DMEM_INIT = PREFIX. N must be
+NPU_DMA_BYTES / 4 of the soc_top being built (4 for the default 16-byte
+NPU port).
+
+    tools/elf2hex.py build/sw/hello.elf --imem imem.hex --dmem dmem --dmem-banks 4
+    # writes imem.hex and dmem0.hex .. dmem3.hex
 """
 
 import argparse
@@ -71,17 +78,33 @@ def build_images(segments):
     return imem, dmem
 
 
-def write_hex(path, image):
-    words = struct.unpack(f"<{len(image) // 4}I", image)
+def image_words(image):
+    return struct.unpack(f"<{len(image) // 4}I", image)
+
+
+def write_hex(path, words):
     with open(path, "w") as f:
         f.writelines(f"{w:08x}\n" for w in words)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    summary, _, details = __doc__.partition("\n\n")
+    parser = argparse.ArgumentParser(
+        description=summary, epilog=details, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("elf", help="input ELF file")
-    parser.add_argument("--imem", metavar="HEX", help="write the IMEM image here")
-    parser.add_argument("--dmem", metavar="HEX", help="write the DMEM image here")
+    parser.add_argument("--imem", metavar="HEX", help="write the IMEM image to this file")
+    parser.add_argument(
+        "--dmem", metavar="PREFIX", help="write DMEM bank b to PREFIX<b>.hex (PREFIX0.hex for one bank)"
+    )
+    parser.add_argument(
+        "--dmem-banks",
+        metavar="N",
+        type=int,
+        choices=(1, 2, 4),
+        default=1,
+        help="number of DMEM banks, NPU_DMA_BYTES / 4 (default 1)",
+    )
     args = parser.parse_args()
     if args.imem is None and args.dmem is None:
         parser.error("give --imem and/or --dmem")
@@ -92,9 +115,11 @@ def main():
         print(f"elf2hex: {e}", file=sys.stderr)
         return 1
     if args.imem is not None:
-        write_hex(args.imem, imem)
+        write_hex(args.imem, image_words(imem))
     if args.dmem is not None:
-        write_hex(args.dmem, dmem)
+        words = image_words(dmem)
+        for b in range(args.dmem_banks):
+            write_hex(f"{args.dmem}{b}.hex", words[b :: args.dmem_banks])
     return 0
 
 

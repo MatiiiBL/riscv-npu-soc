@@ -6,10 +6,12 @@
 // later, so the selection is registered and steers the returned read data in
 // the following cycle.
 //
-// NPU DMA port: mapped straight onto DMEM port B, with the same rule for
-// addresses outside DMEM.
+// NPU DMA port: each access is one aligned DMA_BYTES block, mapped straight
+// onto DMEM port B as block (addr - DMEM base) / DMA_BYTES, with the same
+// rule for addresses outside DMEM.
 module soc_bus #(
-  parameter int DMEM_WORDS = 65536
+  parameter int DMEM_WORDS = 65536,
+  parameter int DMA_BYTES  = 16
 ) (
   input  logic        clk,
   input  logic        rst_n,
@@ -23,12 +25,12 @@ module soc_bus #(
   output logic [31:0] cpu_rdata,
 
   // NPU DMA master
-  input  logic        dma_req,
-  input  logic        dma_we,
-  input  logic [31:0] dma_addr,
-  input  logic [3:0]  dma_be,
-  input  logic [31:0] dma_wdata,
-  output logic [31:0] dma_rdata,
+  input  logic                   dma_req,
+  input  logic                   dma_we,
+  input  logic [31:0]            dma_addr,   // DMA_BYTES aligned
+  input  logic [DMA_BYTES-1:0]   dma_be,
+  input  logic [8*DMA_BYTES-1:0] dma_wdata,
+  output logic [8*DMA_BYTES-1:0] dma_rdata,
 
   // DMEM port A (CPU)
   output logic                          dmem_a_en,
@@ -38,13 +40,13 @@ module soc_bus #(
   output logic [31:0]                   dmem_a_wdata,
   input  logic [31:0]                   dmem_a_rdata,
 
-  // DMEM port B (NPU DMA)
-  output logic                          dmem_b_en,
-  output logic                          dmem_b_we,
-  output logic [3:0]                    dmem_b_be,
-  output logic [$clog2(DMEM_WORDS)-1:0] dmem_b_addr,
-  output logic [31:0]                   dmem_b_wdata,
-  input  logic [31:0]                   dmem_b_rdata,
+  // DMEM port B (NPU DMA), one DMA_BYTES block per access
+  output logic                                      dmem_b_en,
+  output logic                                      dmem_b_we,
+  output logic [DMA_BYTES-1:0]                      dmem_b_be,
+  output logic [$clog2(DMEM_WORDS*4/DMA_BYTES)-1:0] dmem_b_addr,   // block address
+  output logic [8*DMA_BYTES-1:0]                    dmem_b_wdata,
+  input  logic [8*DMA_BYTES-1:0]                    dmem_b_rdata,
 
   // MMIO peripherals (byte offset within the 4 KiB window)
   output logic                          mmio_req,
@@ -64,6 +66,7 @@ module soc_bus #(
 
   localparam int DMEM_AW = $clog2(DMEM_WORDS);
   localparam int DMEM_HI = DMEM_AW + 2;    // first byte-address bit above DMEM
+  localparam int BLK_LO  = $clog2(DMA_BYTES);   // first byte-address bit of a block
 
   localparam logic [31:0] DMEM_BASE = 32'h1000_0000;
   localparam logic [31:0] MMIO_BASE = 32'h2000_0000;
@@ -127,7 +130,7 @@ module soc_bus #(
   assign dmem_b_en    = dma_req && dma_in_dmem;
   assign dmem_b_we    = dma_we;
   assign dmem_b_be    = dma_be;
-  assign dmem_b_addr  = dma_addr[DMEM_HI-1:2];
+  assign dmem_b_addr  = dma_addr[DMEM_HI-1:BLK_LO];
   assign dmem_b_wdata = dma_wdata;
 
   always_ff @(posedge clk) begin
@@ -138,6 +141,6 @@ module soc_bus #(
   assign dma_rdata = dma_rd_ok ? dmem_b_rdata : '0;
 
   logic unused;
-  assign unused = ^{dma_addr[1:0]};
+  assign unused = ^{dma_addr[BLK_LO-1:0]};
 
 endmodule
