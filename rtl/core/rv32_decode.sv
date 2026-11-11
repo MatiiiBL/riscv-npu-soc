@@ -10,7 +10,7 @@ module rv32_decode (
   output logic [4:0]         rs1,
   output logic [4:0]         rs2,
   output logic [4:0]         rd,
-  output logic               uses_rs1,  // operand is read: drives hazard detection
+  output logic               uses_rs1,  // the opcode reads rs1: drives the interlocks
   output logic               uses_rs2,
   output logic               rd_we,     // writes a register other than x0
   output logic [31:0]        imm,       // CSR instructions carry the CSR number in imm[11:0]
@@ -43,6 +43,18 @@ module rv32_decode (
   assign rs1    = insn[19:15];
   assign rs2    = insn[24:20];
 
+  // Which register fields an instruction reads matters only to the
+  // interlocks in ID, which sit on the path from the IMEM output to the
+  // stall. Deriving it from the opcode alone, without the legality checks
+  // below, keeps that path short; an illegal encoding of one of these
+  // opcodes may then stall needlessly before it halts, which changes only
+  // timing. The CSR instructions read nothing (every CSR is read-only).
+  assign uses_rs1 = (opcode == rv32_pkg::OP_JALR)  || (opcode == rv32_pkg::OP_BRANCH) ||
+                    (opcode == rv32_pkg::OP_LOAD)  || (opcode == rv32_pkg::OP_STORE)  ||
+                    (opcode == rv32_pkg::OP_OP_IMM) || (opcode == rv32_pkg::OP_OP);
+  assign uses_rs2 = (opcode == rv32_pkg::OP_BRANCH) || (opcode == rv32_pkg::OP_STORE) ||
+                    (opcode == rv32_pkg::OP_OP);
+
   assign imm_i = {{20{insn[31]}}, insn[31:20]};
   assign imm_s = {{20{insn[31]}}, insn[31:25], insn[11:7]};
   assign imm_b = {{19{insn[31]}}, insn[31], insn[7], insn[30:25], insn[11:8], 1'b0};
@@ -52,8 +64,6 @@ module rv32_decode (
   always_comb begin
     legal      = 1'b0;
     writes_rd  = 1'b0;
-    uses_rs1   = 1'b0;
-    uses_rs2   = 1'b0;
     imm        = imm_i;
     alu_op     = rv32_pkg::ALU_ADD;
     opa_sel    = rv32_pkg::OPA_RS1;
@@ -94,15 +104,12 @@ module rv32_decode (
       rv32_pkg::OP_JALR: begin
         legal     = (funct3 == 3'b000);
         writes_rd = 1'b1;
-        uses_rs1  = 1'b1;
         is_jalr   = 1'b1;
         res_sel   = rv32_pkg::RES_LINK;
       end
 
       rv32_pkg::OP_BRANCH: begin
         legal     = (funct3 != 3'b010) && (funct3 != 3'b011);
-        uses_rs1  = 1'b1;
-        uses_rs2  = 1'b1;
         imm       = imm_b;
         is_branch = 1'b1;
       end
@@ -110,14 +117,11 @@ module rv32_decode (
       rv32_pkg::OP_LOAD: begin
         legal     = (funct3 != 3'b011) && (funct3 != 3'b110) && (funct3 != 3'b111);
         writes_rd = 1'b1;
-        uses_rs1  = 1'b1;
         is_load   = 1'b1;
       end
 
       rv32_pkg::OP_STORE: begin
         legal     = (funct3[2] == 1'b0) && (funct3[1:0] != 2'b11);
-        uses_rs1  = 1'b1;
-        uses_rs2  = 1'b1;
         imm       = imm_s;
         is_store  = 1'b1;
       end
@@ -125,7 +129,6 @@ module rv32_decode (
       rv32_pkg::OP_OP_IMM: begin
         legal     = 1'b1;
         writes_rd = 1'b1;
-        uses_rs1  = 1'b1;
         case (funct3)
           3'b000: alu_op = rv32_pkg::ALU_ADD;
           3'b010: alu_op = rv32_pkg::ALU_SLT;
@@ -147,8 +150,6 @@ module rv32_decode (
 
       rv32_pkg::OP_OP: begin
         writes_rd = 1'b1;
-        uses_rs1  = 1'b1;
-        uses_rs2  = 1'b1;
         opb_imm   = 1'b0;
         if (funct7 == 7'b0000001) begin
           legal  = 1'b1;
@@ -185,7 +186,7 @@ module rv32_decode (
           is_halt = 1'b1;
         end else if (funct3 != 3'b100) begin
           // Zicsr. Every CSR is read-only and writes are ignored, so rs1/uimm
-          // is never needed and the instruction must not interlock on it.
+          // is never needed (uses_rs1 stays low).
           legal     = 1'b1;
           writes_rd = 1'b1;
           res_sel   = rv32_pkg::RES_CSR;
@@ -201,8 +202,6 @@ module rv32_decode (
     // A halting instruction has no architectural effect besides stopping.
     if (is_halt) begin
       writes_rd = 1'b0;
-      uses_rs1  = 1'b0;
-      uses_rs2  = 1'b0;
       is_branch = 1'b0;
       is_jal    = 1'b0;
       is_jalr   = 1'b0;
