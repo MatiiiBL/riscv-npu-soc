@@ -356,16 +356,35 @@ NPU traffic never stalls the core.
 ## 7. Simulator
 
 `sim/` builds `build/sim/soc_sim` with `-O3 --x-assign fast --x-initial
-fast`; `make -C sim BP_MODE=0` builds `soc_sim_bp0` (static prediction) and
-`make -C sim NPU_DMA_BYTES=4` (or 8) builds `soc_sim_dma4` with a narrower
-NPU port, and the two knobs combine. Tracing is compiled in and only enabled
-by `--vcd`. The ELF loader in `sim/elf_loader.cpp` copies the `PT_LOAD`
-segments by physical address into zero-filled IMEM and DMEM images, and the
-harness writes them into the model's memory arrays, which `sim/sim.vlt`
-keeps public. It finds them through Verilator's scope table by instance
-name, counting the DMEM banks the model was built with, so the same harness
-works for every `NPU_DMA_BYTES`. The register file starts at zero, like the
-ISS's.
+fast`. Knobs select variants, and they combine:
+
+| `make -C sim ...` | Binary | Difference |
+|-------------------|--------|------------|
+| `BP_MODE=0` | `soc_sim_bp0` | static not-taken prediction |
+| `NPU_DMA_BYTES=4` (or 8) | `soc_sim_dma4` | narrower NPU port, fewer DMEM banks |
+| `RANDRESET=1` | `soc_sim_randreset` | `--x-initial unique --x-assign unique`: every unreset flop and memory starts random (seed 1, or `+verilator+seed+N`) |
+| `SERIAL_UART=1` | `soc_sim_uart` | `SIM = 0`, `UART_DIV = 5`: the real UART, with stdout decoded from `uart_txd` |
+
+Tracing is compiled in and only enabled by `--vcd`. The command line and
+the ELF checks are the ISS's (`tools/iss`): `--max-cycles` is decimal only,
+`-h` exits 0, and `sim/elf_loader.cpp` rejects exactly what the ISS's
+loader rejects (not an `ET_EXEC` RISC-V ELF32, a missing or truncated
+program header table, a segment outside the file or not inside IMEM or
+DMEM) with exit code 125, checking each segment before writing anything.
+`+verilator+...` options go to Verilator through `commandArgs`. The loader
+copies the `PT_LOAD` segments by physical address into zero-filled IMEM and
+DMEM images, and the harness writes them into the model's memory arrays,
+which `sim/sim.vlt` keeps public. It finds them through Verilator's scope
+table by instance name, counting the DMEM banks the model was built with,
+so the same harness works for every `NPU_DMA_BYTES`. The register file
+starts at zero, like the ISS's.
+
+In the serial build the harness samples every bit of the 8N1 frames in its
+middle, keeps clocking after the run ends until the bytes stored to
+`UART_TX` before the end have arrived, and reports in `--stats` how many
+`UART_STATUS` reads found the transmitter busy. A byte written while the
+UART is busy is dropped by the hardware, so a firmware bug in the
+backpressure loop shows up as missing output on this build only.
 
 Each loop iteration observes one settled cycle and then clocks the model.
 Within a cycle the retirement port (the WB instruction) is handled before
@@ -387,7 +406,11 @@ and about 4 M cycles/s while writing a commit log.
 |------|---------|--------|
 | riscv-tests rv32ui + rv32um, `BP_MODE = 1` | `make test-isa-rtl` | 48/48 |
 | same, `BP_MODE = 0` | `make test-isa-rtl RTL_SIM=build/sim/soc_sim_bp0` | 48/48 |
-| directed tests, both builds | `make -C verif/core` | 30/30 runs |
+| directed tests, both builds, with difftest and `--stats` checks | `make -C verif/core` | 30/30 runs |
+| `soc_sim` and the ISS reject the same ELFs and command lines | `make -C verif/core cli` | 31/31 cases |
+| riscv-tests and firmware from random initial state, seeds 1-3 | `make -C verif/core randreset` | 3 x (48 + 8) |
+| predictor builds give identical commit logs | `make -C verif/core bp-compare` | 70/70 programs |
+| firmware output over the real serial UART | `make -C verif/core uart-serial` | 8/8 tests |
 | lint | `make lint` | clean |
 | synthesis | `make -C rtl synth-check` | see section 9 |
 
@@ -402,7 +425,14 @@ fetches outside IMEM, off its end and from a misaligned pc. Each
 test checks its own results against constants (the M-extension values were
 computed with an independent Python model of the ISA), and `check.sh` also
 verifies the exit code, the UART output and that the commit log has exactly
-`instret` lines. `timing.S` checks the pipeline costs of sections 1-3
+`instret` lines. It runs every test that does not read `cycle` (all but
+`csr.S` and `timing.S`) through `tools/difftest.py`, so its commit log must
+match the ISS line for line, and checks the `--stats` counters: all
+present, `cycles >= instret`, mispredicts no more than branches, and the
+counter each test exists to exercise above zero (load-use stalls for
+`loaduse.S`, mispredicts for `bpred.S` and `calls.S`, divider stalls for
+`muldiv.S`). Only "above zero" is required, so these checks survive changes
+to the hazard costs. `timing.S` checks the pipeline costs of sections 1-3
 cycle-exactly, once per predictor mode.
 
 While the tests were written, each was checked against deliberately broken
@@ -413,9 +443,17 @@ a 31-step divider, no target check, a wrong BHT counter bit, and the
 harness processing strobes before retirement); every mutant fails at least
 one test, and several are caught by nothing but these tests.
 
-The predictor must never change architectural behavior, so the commit logs
-of `soc_sim` and `soc_sim_bp0` are identical for every program (checked for
-all riscv-tests, the directed tests and `hello`).
+The predictor must never change architectural behavior, so `bp-compare`
+requires the commit logs of `soc_sim` and `soc_sim_bp0` to be identical for
+every directed test, riscv-test and firmware test. The exceptions read
+something that depends on time: `csr.S` reads `cycle`, and the NPU tests
+poll `BUSY`, whose number of iterations depends on how fast the core runs.
+For those only the UART output and exit code must match.
+
+The `randreset` build catches state that is used before it is reset: with
+the reset of the core's EX valid bit removed, the normal build still passes
+all 48 riscv-tests (Verilator zeroes the flop), while the randomized build
+fails all of them.
 
 ## 9. Results
 
