@@ -396,8 +396,8 @@ Yosys `synth_ecp5` of `soc_top` with the `hello` image
 
 | Resource | Count | Notes |
 |----------|-------|-------|
-| LUT4 | 4492 | about 5% of an ECP5-85F |
-| TRELLIS_FF | 1575 | |
+| LUT4 | 4380 | about 5% of an ECP5-85F |
+| TRELLIS_FF | 1577 | |
 | CCU2C | 400 | carry chains |
 | DP16KD | 159 | 128 DMEM, 29 IMEM, 2 BTB |
 | TRELLIS_DPR16X4 | 36 | register file (16 per read port), BTB counters (4) |
@@ -405,5 +405,5 @@ Yosys `synth_ecp5` of `soc_top` with the `hello` image
 
 IMEM is built from 32 one-bit-wide RAM columns; Yosys drops the columns
 whose bit is constant across the whole image (3 for `hello`), so a full
-program uses 32. The core alone (`rv32_core`) is about 3300 LUT4 and 1100
+program uses 32. The core alone (`rv32_core`) is 3246 LUT4 and 1115
 flip-flops.
