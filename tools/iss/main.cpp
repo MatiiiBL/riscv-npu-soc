@@ -194,9 +194,10 @@ int main(int argc, char** argv) {
         break;
     case iss::StopReason::kIllegal: {
         const uint32_t pc = cpu.pc();
-        const bool bad_pc = pc - iss::kImemBase >= iss::kImemSize || (pc & 3) != 0;
-        std::fprintf(stderr, "iss: illegal instruction 0x%08x at pc 0x%08x%s\n", cpu.insn_at(pc), pc,
-                     bad_pc ? " (fetch outside IMEM or misaligned)" : "");
+        const char* why = pc - iss::kImemBase >= iss::kImemSize ? " (fetch outside IMEM)"
+                          : (pc & 3) != 0                       ? " (fetch from a misaligned pc)"
+                                                                : "";
+        std::fprintf(stderr, "iss: illegal instruction 0x%08x at pc 0x%08x%s\n", cpu.insn_at(pc), pc, why);
         code = kExitIllegal;
         break;
     }
