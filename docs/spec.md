@@ -148,30 +148,37 @@ output logic        halted          // high once ECALL/EBREAK/illegal has retire
 
 ```systemverilog
 module npu_top #(
-  parameter int ARR  = 8,      // array is ARR x ARR processing elements
-  parameter int KMAX = 1024    // longest supported inner dimension
+  parameter int ARR       = 8,     // array is ARR x ARR processing elements
+  parameter int KMAX      = 1024,  // longest supported inner dimension
+  parameter int DMA_BYTES = 4      // DMA port width in bytes: 4, 8 or 16
 ) (
-  input  logic        clk,
-  input  logic        rst_n,
+  input  logic                   clk,
+  input  logic                   rst_n,
   // register port, driven by the SoC decoder (offset within the NPU window)
-  input  logic        cfg_req,
-  input  logic        cfg_we,
-  input  logic [11:0] cfg_addr,    // byte offset, word aligned
-  input  logic [31:0] cfg_wdata,
-  output logic [31:0] cfg_rdata,   // valid the cycle after a read request
+  input  logic                   cfg_req,
+  input  logic                   cfg_we,
+  input  logic [11:0]            cfg_addr,    // byte offset, word aligned
+  input  logic [31:0]            cfg_wdata,
+  output logic [31:0]            cfg_rdata,   // valid the cycle after a read request
   // DMA master on DMEM port B
-  output logic        dma_req,
-  output logic        dma_we,
-  output logic [31:0] dma_addr,    // full SoC byte address, word aligned
-  output logic [3:0]  dma_be,
-  output logic [31:0] dma_wdata,
-  input  logic [31:0] dma_rdata,   // valid the cycle after a read request
-  output logic        irq          // high while STATUS.DONE is set (not wired to the core)
+  output logic                   dma_req,
+  output logic                   dma_we,
+  output logic [31:0]            dma_addr,    // full SoC byte address, DMA_BYTES aligned
+  output logic [DMA_BYTES-1:0]   dma_be,      // lane i = byte dma_addr + i
+  output logic [8*DMA_BYTES-1:0] dma_wdata,
+  input  logic [8*DMA_BYTES-1:0] dma_rdata,   // valid the cycle after a read request
+  output logic                   irq          // high while STATUS.DONE is set (not wired to the core)
 );
 ```
 
-The SoC maps `dma_addr` into DMEM as `(dma_addr - 0x1000_0000) >> 2`;
-DMA accesses outside DMEM read 0 and drop writes.
+Every DMA access is one aligned block of `DMA_BYTES` bytes (little-endian:
+byte `dma_addr + i` is `dma_wdata[8i +: 8]`). The SoC maps `dma_addr` into
+DMEM as block `(dma_addr - 0x1000_0000) / DMA_BYTES`; with `DMA_BYTES > 4`
+DMEM is banked by word address, so one block reads `DMA_BYTES / 4` 32-bit
+banks in parallel. DMA accesses outside DMEM read 0 and drop writes. The
+register interface does not depend on `DMA_BYTES`: operand addresses and
+strides only need to be 4-byte aligned, and the NPU fetches the aligned
+blocks that cover each row. The default (4) matches a 32-bit DMEM port.
 
 ## 5. NPU programming model
 
@@ -237,8 +244,9 @@ CYCLES = cycles elapsed; BUSY = 0; DONE = 1
 ```
 
 The NPU only writes the bytes of C it produces (byte enables on partial
-words). Rows of A and B are read as whole words; bytes past K in the last
-word of a row are ignored. Software must not write memory the NPU reads, or
+words). Rows of A and B, and the bias vector, are read as the aligned
+`DMA_BYTES` blocks that cover them; the other bytes of those blocks are
+ignored. Software must not write memory the NPU reads, or
 read memory it writes, while `BUSY` is set.
 
 The ISS executes an operation instantly at the `START` write (it never

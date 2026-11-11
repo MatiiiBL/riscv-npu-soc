@@ -2,8 +2,8 @@
 // element per cycle, through a fused bias / requantize / ReLU pipeline and
 // writes C back over the DMA port.
 //
-//   S0  issue (m, n); bias RAM read address = n
-//   S1  acc[m][n] selected, bias word available
+//   S0  issue (m, n)
+//   S1  acc[m][n] and bias[n] selected
 //   S2  v = acc + bias                                      (INT32, wrapping)
 //   S3  partial products of v * q  (two 16-bit halves of v, one DSP each)
 //   S4  p = v * q + round  (exact, 48 bits)
@@ -34,9 +34,8 @@ module npu_wb #(
   input  logic signed [15:0]    qmult,
   // accumulators, PE (i, j) at [32*(i*ARR + j) +: 32]
   input  logic [ARR*ARR*32-1:0] acc,
-  // bias RAM read port (one cycle latency)
-  output logic [RW-1:0]         bias_raddr,
-  input  logic [31:0]           bias_rdata,
+  // bias vector, bias[n] at [32*n +: 32]
+  input  logic [ARR*32-1:0]     bias,
   // write request (registered)
   output logic                  wr_req,
   output logic [31:0]           wr_addr,
@@ -46,7 +45,9 @@ module npu_wb #(
 );
 
   logic [ARR-1:0][ARR-1:0][31:0] acc_tile;
+  logic [ARR-1:0][31:0]          bias_vec;
   assign acc_tile = acc;
+  assign bias_vec = bias;
 
   // ---------------------------------------------------------------- S0
   logic          busy_q, issue_q;
@@ -54,7 +55,6 @@ module npu_wb #(
   logic          row_end, tile_end;
   assign row_end    = (in_q == RW'(n_rows - CW'(1)));
   assign tile_end   = row_end && (im_q == RW'(m_rows - CW'(1)));
-  assign bias_raddr = in_q;
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
@@ -103,7 +103,7 @@ module npu_wb #(
   assign sh  = out_int8 ? shift : 5'd0;
   assign rnd = (sh == 5'd0) ? 48'd0 : (48'd1 << (sh - 5'd1));
 
-  logic [31:0]        s1_acc, s2_v32;
+  logic [31:0]        s1_acc, s1_bias, s2_v32;
   logic signed [32:0] s3_lo;   // unsigned v[15:0] * q
   logic signed [31:0] s3_hi;   // signed   v[31:16] * q
   logic signed [47:0] s4_p, s5_r;
@@ -111,8 +111,9 @@ module npu_wb #(
   // v * q = (v[31:16] * q) * 2^16 + v[15:0] * q, exact in 48 bits:
   // |p| <= 2^46 and |round| <= 2^30.
   always_ff @(posedge clk) begin
-    s1_acc <= acc_tile[im_q][in_q];
-    s2_v32 <= s1_acc + (bias_en ? bias_rdata : 32'd0);
+    s1_acc  <= acc_tile[im_q][in_q];
+    s1_bias <= bias_vec[in_q];
+    s2_v32  <= s1_acc + (bias_en ? s1_bias : 32'd0);
     s3_lo  <= $signed({1'b0, s2_v32[15:0]}) * q;
     s3_hi  <= $signed(s2_v32[31:16]) * q;
     s4_p   <= {s3_hi, 16'h0000} + {{15{s3_lo[32]}}, s3_lo} + rnd;

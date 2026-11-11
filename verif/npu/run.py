@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Build npu_top with Verilator and run the cocotb suite for each configuration.
 
-    run.py [--arr 8 --arr 4] [--kmax 1024] [--seed 1] [--random-ops 300]
-           [--test NAME] [--waves]
+    run.py [--config ARR:DMA_BYTES ...] [--kmax 1024] [--seed 1]
+           [--random-ops 300] [--test NAME] [--waves]
 
-Exits nonzero if any build fails or any test fails in any configuration.
+The default configurations are 8:4, 8:8, 8:16 and 4:16. Exits nonzero if
+any build fails or any test fails in any configuration.
 """
 
 from __future__ import annotations
@@ -26,13 +27,17 @@ def rtl_sources() -> list[Path]:
     return [RTL_LIST.parent / line.strip() for line in lines if line.strip()]
 
 
-def run_config(arr: int, kmax: int, args: argparse.Namespace) -> tuple[int, int]:
-    build_dir = REPO / "build" / "npu" / f"arr{arr}_k{kmax}"
+DEFAULT_CONFIGS = ["8:4", "8:8", "8:16", "4:16"]
+
+
+def run_config(arr: int, dma_bytes: int, kmax: int,
+               args: argparse.Namespace) -> tuple[int, int]:
+    build_dir = REPO / "build" / "npu" / f"arr{arr}_k{kmax}_d{dma_bytes}"
     runner = get_runner("verilator")
     runner.build(
         sources=rtl_sources(),
         hdl_toplevel="npu_top",
-        parameters={"ARR": arr, "KMAX": kmax},
+        parameters={"ARR": arr, "KMAX": kmax, "DMA_BYTES": dma_bytes},
         # Randomize everything without a reset (RAM contents, datapath
         # registers) so the tests cannot pass by relying on zero init.
         build_args=["--x-assign", "unique", "--x-initial", "unique",
@@ -51,6 +56,7 @@ def run_config(arr: int, kmax: int, args: argparse.Namespace) -> tuple[int, int]
         extra_env={
             "NPU_ARR": str(arr),
             "NPU_KMAX": str(kmax),
+            "NPU_DMA_BYTES": str(dma_bytes),
             "NPU_SEED": str(args.seed),
             "NPU_RANDOM_OPS": str(args.random_ops),
             "NPU_REPORT": str(build_dir / "cycles.md"),
@@ -62,8 +68,9 @@ def run_config(arr: int, kmax: int, args: argparse.Namespace) -> tuple[int, int]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--arr", type=int, action="append",
-                        help="array size (repeatable; default 8 and 4)")
+    parser.add_argument("--config", action="append", metavar="ARR:DMA_BYTES",
+                        help="configuration to run (repeatable; default "
+                             + " ".join(DEFAULT_CONFIGS) + ")")
     parser.add_argument("--kmax", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--random-ops", type=int, default=300)
@@ -72,13 +79,14 @@ def main() -> int:
     args = parser.parse_args()
 
     summary = []
-    for arr in args.arr or [8, 4]:
-        total, failed = run_config(arr, args.kmax, args)
-        summary.append((arr, total, failed))
+    for config in args.config or DEFAULT_CONFIGS:
+        arr, dma_bytes = (int(x) for x in config.split(":"))
+        total, failed = run_config(arr, dma_bytes, args.kmax, args)
+        summary.append((arr, dma_bytes, total, failed))
 
     ok = True
-    for arr, total, failed in summary:
-        print(f"npu ARR={arr} KMAX={args.kmax} seed={args.seed}: "
+    for arr, dma_bytes, total, failed in summary:
+        print(f"npu ARR={arr} KMAX={args.kmax} DMA_BYTES={dma_bytes} seed={args.seed}: "
               f"{total - failed}/{total} tests passed")
         ok &= failed == 0 and total > 0
     return 0 if ok else 1

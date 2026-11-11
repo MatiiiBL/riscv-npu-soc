@@ -107,10 +107,10 @@ class Dmem:
     def write32(self, addr: int, value: int) -> None:
         self.write(addr, (value & MASK32).to_bytes(4, "little"))
 
-    def write_be(self, addr: int, value: int, be: int) -> None:
-        """A 32-bit bus write with byte enables (lane i = byte addr + i)."""
-        off = self.offset(addr, 4)
-        for lane in range(4):
+    def write_be(self, addr: int, value: int, be: int, size: int = 4) -> None:
+        """A bus write of `size` bytes with byte enables (lane i = byte addr + i)."""
+        off = self.offset(addr, size)
+        for lane in range(size):
             if be & (1 << lane):
                 self.data[off + lane] = (value >> (8 * lane)) & 0xFF
 
@@ -205,23 +205,29 @@ class NpuModel:
                     mem.write32((row + 4 * n) & MASK32, v)
 
 
-def expected_reads(regs: dict[int, int], ctrl: int) -> list[int]:
-    """Word addresses the DMA reads for an operation, in issue order."""
-    words = (regs[K] + 3) // 4
+def row_blocks(base: int, length: int, dma_bytes: int) -> list[int]:
+    """Aligned DMA blocks covering `length` bytes from `base`."""
+    first = base & ~(dma_bytes - 1)
+    last = (base + length - 1) & ~(dma_bytes - 1)
+    return [(first + i) & MASK32 for i in range(0, last - first + 1, dma_bytes)]
+
+
+def expected_reads(regs: dict[int, int], ctrl: int, dma_bytes: int) -> list[int]:
+    """Block addresses the DMA reads for an operation, in issue order."""
     addrs = []
     for base, stride, rows in ((regs[A_ADDR], regs[A_STRIDE], regs[M]),
                                (regs[B_ADDR], regs[B_STRIDE], regs[N])):
         for row in range(rows):
-            addrs.extend((base + row * stride + 4 * w) & MASK32 for w in range(words))
+            addrs += row_blocks(base + row * stride, regs[K], dma_bytes)
     if regs[BIAS_ADDR] and not ctrl & CTRL_NO_WB:
-        addrs.extend((regs[BIAS_ADDR] + 4 * n) & MASK32 for n in range(regs[N]))
+        addrs += row_blocks(regs[BIAS_ADDR], 4 * regs[N], dma_bytes)
     return addrs
 
 
-def expected_cycles(regs: dict[int, int], ctrl: int) -> int:
+def expected_cycles(regs: dict[int, int], ctrl: int, dma_bytes: int) -> int:
     """CYCLES of a valid operation: the four phases of docs/npu.md."""
     m, n, k = regs[M], regs[N], regs[K]
-    load = len(expected_reads(regs, ctrl)) + 1
-    compute = k + m + n + 1
+    load = len(expected_reads(regs, ctrl, dma_bytes)) + 1
+    compute = k + m + n + 2
     write_back = 0 if ctrl & CTRL_NO_WB else m * n + 6
     return load + compute + write_back

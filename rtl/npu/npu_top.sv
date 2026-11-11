@@ -6,17 +6,19 @@
 //
 // An operation runs four phases back to back:
 //   LOAD     npu_dma copies M rows of A, N rows of B and the N bias words
-//            (when used) into the buffers: one bus word per cycle
-//   COMPUTE  npu_opbuf feeds the array with skewed rows; K + M + N + 1
+//            (when used) into the buffers: one DMA_BYTES block per cycle
+//   COMPUTE  npu_opbuf feeds the array with skewed rows; K + M + N + 2
 //            cycles, including the fill and drain of the wavefront
 //   WB       npu_wb post-processes and writes C, one element per cycle
 //   finish   BUSY drops, DONE and irq rise
 // Rejected parameters finish immediately with ERR and touch no memory.
 //
 // ARR must be 1..255 and KMAX 1..65535 so they fit the INFO fields.
+// DMA_BYTES is the DMA port width in bytes: 4, 8 or 16.
 module npu_top #(
-  parameter int ARR  = 8,
-  parameter int KMAX = 1024
+  parameter int ARR       = 8,
+  parameter int KMAX      = 1024,
+  parameter int DMA_BYTES = 4
 ) (
   input  logic        clk,
   input  logic        rst_n,
@@ -27,22 +29,37 @@ module npu_top #(
   input  logic [31:0] cfg_wdata,
   output logic [31:0] cfg_rdata,
   // DMA master on DMEM port B
-  output logic        dma_req,
-  output logic        dma_we,
-  output logic [31:0] dma_addr,
-  output logic [3:0]  dma_be,
-  output logic [31:0] dma_wdata,
-  input  logic [31:0] dma_rdata,
-  output logic        irq
+  output logic                   dma_req,
+  output logic                   dma_we,
+  output logic [31:0]            dma_addr,   // DMA_BYTES aligned
+  output logic [DMA_BYTES-1:0]   dma_be,
+  output logic [8*DMA_BYTES-1:0] dma_wdata,
+  input  logic [8*DMA_BYTES-1:0] dma_rdata,
+  output logic                   irq
 );
 
+  // Widths shared with npu_dma and npu_opbuf (they derive the same values).
+  localparam int LANES  = DMA_BYTES / 4;
+  localparam int LSH    = $clog2(LANES);
   localparam int RW     = (ARR > 1) ? $clog2(ARR) : 1;
   localparam int CW     = $clog2(ARR + 1);
   localparam int KW     = $clog2(KMAX + 1);
   localparam int WDEPTH = (KMAX + 3) / 4;
-  localparam int WAW    = (WDEPTH > 1) ? $clog2(WDEPTH) : 1;
-  localparam int TW0    = $clog2(KMAX + 2 * ARR + 1);
-  localparam int TW     = (TW0 > WAW + 2) ? TW0 : WAW + 2;
+  localparam int LDEPTH = (WDEPTH + LANES - 1) / LANES;
+  localparam int BDEPTH = (ARR + LANES - 1) / LANES;
+  localparam int IW0    = (LDEPTH > BDEPTH) ? LDEPTH : BDEPTH;
+  localparam int IW     = (IW0 > 1) ? $clog2(IW0) : 1;
+  localparam int TW0    = $clog2(KMAX + 2 * ARR + 2);
+  localparam int TW     = (TW0 > IW + LSH + 2) ? TW0 : IW + LSH + 2;
+
+  localparam logic [31:0] BLK_MASK = 32'(DMA_BYTES - 1);
+
+  if (DMA_BYTES != 4 && DMA_BYTES != 8 && DMA_BYTES != 16) begin : g_bad_dma_bytes
+    $error("npu_top: DMA_BYTES must be 4, 8 or 16");
+  end
+  if (ARR < 1 || ARR > 255 || KMAX < 1 || KMAX > 65535) begin : g_bad_size
+    $error("npu_top: ARR must be 1..255 and KMAX 1..65535 (INFO fields)");
+  end
 
   localparam logic [31:0] VERSION = 32'd1;
   localparam logic [31:0] INFO    = (VERSION << 24) | (32'(KMAX) << 8) | 32'(ARR);
@@ -174,9 +191,9 @@ module npu_top #(
   logic          dma_done, wb_done;
   logic          dma_start, wb_start, compute_end, acc_clr;
 
-  // The last product reaches PE (M-1, N-1) at step K + M + N - 1 and is
+  // The last product reaches PE (M-1, N-1) at step K + M + N and is
   // accumulated one cycle later (see npu_opbuf and npu_pe for the stages).
-  assign step_last   = TW'(k_len) + TW'(m_rows) + TW'(n_rows);
+  assign step_last   = TW'(k_len) + TW'(m_rows) + TW'(n_rows) + TW'(1);
   assign compute_end = (state_q == S_COMPUTE) && (step_q == step_last);
   assign dma_start   = (state_q == S_IDLE) && start && params_ok;
   assign wb_start    = compute_end && !nowb_q;
@@ -238,12 +255,14 @@ module npu_top #(
   assign irq = done_q;
 
   // ------------------------------------------------------------ datapath
-  logic           rd_req, fill_a, fill_b, fill_bias;
-  logic [31:0]    rd_addr;
-  logic [RW-1:0]  fill_row;
-  logic [WAW-1:0] fill_word;
+  logic                rd_req, fill_a, fill_b, fill_bias;
+  logic [31:0]         rd_addr;
+  logic [RW-1:0]       fill_row;
+  logic [LANES-1:0]    fill_lane_en;
+  logic [LANES*IW-1:0] fill_lane_idx;
+  logic [LANES*32-1:0] fill_lane_data;
 
-  npu_dma #(.ARR(ARR), .KMAX(KMAX)) u_dma (
+  npu_dma #(.ARR(ARR), .KMAX(KMAX), .DMA_BYTES(DMA_BYTES)) u_dma (
     .clk,
     .rst_n,
     .start     (dma_start),
@@ -255,14 +274,19 @@ module npu_top #(
     .m_rows,
     .n_rows,
     .k_len,
-    .load_bias (bias_en && !nowb_q),
+    .load_a    (1'b1),
+    .load_b    (1'b1),
+    .load_bias (bias_en && !cfg_wdata[2]),   // the bias is only needed for write-back
     .rd_req,
     .rd_addr,
+    .rd_data   (dma_rdata),
     .fill_a,
     .fill_b,
     .fill_bias,
     .fill_row,
-    .fill_word,
+    .fill_lane_en,
+    .fill_lane_idx,
+    .fill_lane_data,
     .done      (dma_done)
   );
 
@@ -270,13 +294,14 @@ module npu_top #(
   logic [ARR*8-1:0] a_feed, b_feed;
   assign run = (state_q == S_COMPUTE);
 
-  npu_opbuf #(.ARR(ARR), .KMAX(KMAX)) u_abuf (
+  npu_opbuf #(.ARR(ARR), .KMAX(KMAX), .LANES(LANES)) u_abuf (
     .clk,
     .rst_n,
-    .wr_en   (fill_a),
-    .wr_bank (fill_row),
-    .wr_addr (fill_word),
-    .wr_data (dma_rdata),
+    .fill_en (fill_a),
+    .fill_row,
+    .fill_lane_en,
+    .fill_lane_idx,
+    .fill_lane_data,
     .run,
     .step    (step_q),
     .k_len,
@@ -284,13 +309,14 @@ module npu_top #(
     .feed    (a_feed)
   );
 
-  npu_opbuf #(.ARR(ARR), .KMAX(KMAX)) u_bbuf (
+  npu_opbuf #(.ARR(ARR), .KMAX(KMAX), .LANES(LANES)) u_bbuf (
     .clk,
     .rst_n,
-    .wr_en   (fill_b),
-    .wr_bank (fill_row),
-    .wr_addr (fill_word),
-    .wr_data (dma_rdata),
+    .fill_en (fill_b),
+    .fill_row,
+    .fill_lane_en,
+    .fill_lane_idx,
+    .fill_lane_data,
     .run,
     .step    (step_q),
     .k_len,
@@ -298,17 +324,20 @@ module npu_top #(
     .feed    (b_feed)
   );
 
-  logic [RW-1:0] bias_raddr;
-  logic [31:0]   bias_rdata;
+  // Bias vector: up to LANES words arrive per cycle, so it is kept in
+  // registers rather than a RAM.
+  logic [ARR-1:0][31:0] bias_q;
 
-  npu_sdp_ram #(.WIDTH(32), .DEPTH(ARR)) u_bias (
-    .clk,
-    .we    (fill_bias),
-    .waddr (fill_row),
-    .wdata (dma_rdata),
-    .raddr (bias_raddr),
-    .rdata (bias_rdata)
-  );
+  always_ff @(posedge clk) begin
+    for (int n = 0; n < ARR; n++) begin
+      for (int l = 0; l < LANES; l++) begin
+        if (fill_bias && fill_lane_en[l] &&
+            ((32'(fill_lane_idx[IW*l +: IW]) << LSH) | 32'(l)) == 32'(n)) begin
+          bias_q[n] <= fill_lane_data[32*l +: 32];
+        end
+      end
+    end
+  end
 
   logic [ARR*ARR*32-1:0] acc;
 
@@ -339,8 +368,7 @@ module npu_top #(
     .shift      (quant_q[4:0]),
     .qmult      (qmult_q[15:0]),
     .acc,
-    .bias_raddr,
-    .bias_rdata,
+    .bias       (bias_q),
     .wr_req,
     .wr_addr,
     .wr_be,
@@ -349,11 +377,16 @@ module npu_top #(
   );
 
   // The load and write-back phases never overlap, so the two masters share
-  // the port through a plain mux. Reads fetch whole words.
+  // the port through a plain mux. Reads fetch whole blocks. Write-back
+  // produces one 32-bit word at a time; it is replicated into every word
+  // lane of the block and the byte enables select the right one.
+  logic [31:0] wr_lane;
+  assign wr_lane = (wr_addr & BLK_MASK) >> 2;
+
   assign dma_req   = rd_req || wr_req;
   assign dma_we    = wr_req;
-  assign dma_addr  = wr_req ? wr_addr : rd_addr;
-  assign dma_be    = wr_req ? wr_be : 4'b1111;
-  assign dma_wdata = wr_data;
+  assign dma_addr  = wr_req ? (wr_addr & ~BLK_MASK) : rd_addr;
+  assign dma_be    = wr_req ? (DMA_BYTES'(wr_be) << (4 * wr_lane)) : '1;
+  assign dma_wdata = {LANES{wr_data}};
 
 endmodule

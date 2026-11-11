@@ -12,8 +12,8 @@ on dma_rdata in every cycle that carries no read response, so any use of the
 bus data at the wrong time shows up as a mismatch.
 
 Configuration comes from the environment (set by run.py): NPU_ARR, NPU_KMAX,
-NPU_SEED (default 1), NPU_RANDOM_OPS (default 300) and NPU_REPORT (a file the
-cycle measurements are written to).
+NPU_DMA_BYTES, NPU_SEED (default 1), NPU_RANDOM_OPS (default 300) and
+NPU_REPORT (a file the cycle measurements are written to).
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from npu_model import (A_ADDR, A_STRIDE, B_ADDR, B_STRIDE, BIAS_ADDR, C_ADDR,
 
 ARR = int(os.environ.get("NPU_ARR", "8"))
 KMAX = int(os.environ.get("NPU_KMAX", "1024"))
+DMA_BYTES = int(os.environ.get("NPU_DMA_BYTES", "4"))
 SEED = int(os.environ.get("NPU_SEED", "1"))
 RANDOM_OPS = int(os.environ.get("NPU_RANDOM_OPS", "300"))
 
@@ -100,7 +101,7 @@ class Testbench:
         self.reads: list[int] = []
         self.writes: list[tuple[int, int, int]] = []
         self.irq_at_read = 0
-        dut._log.info("seed=%d ARR=%d KMAX=%d", SEED, ARR, KMAX)
+        dut._log.info("seed=%d ARR=%d KMAX=%d DMA_BYTES=%d", SEED, ARR, KMAX, DMA_BYTES)
 
     @classmethod
     async def create(cls, dut, name: str) -> Testbench:
@@ -129,18 +130,18 @@ class Testbench:
         resp = None
         while True:
             await FallingEdge(d.clk)
-            d.dma_rdata.value = resp if resp is not None else self.junk.getrandbits(32)
+            d.dma_rdata.value = resp if resp is not None else self.junk.getrandbits(8 * DMA_BYTES)
             resp = None
             if int(d.dma_req.value):
                 addr = int(d.dma_addr.value)
-                assert addr % 4 == 0, f"misaligned DMA address 0x{addr:08x}"
+                assert addr % DMA_BYTES == 0, f"misaligned DMA address 0x{addr:08x}"
                 if int(d.dma_we.value):
                     be, data = int(d.dma_be.value), int(d.dma_wdata.value)
                     assert be != 0, f"DMA write with no byte enables at 0x{addr:08x}"
-                    self.mem.write_be(addr, data, be)
+                    self.mem.write_be(addr, data, be, DMA_BYTES)
                     self.writes.append((addr, be, data))
                 else:
-                    resp = self.mem.read32(addr)
+                    resp = int.from_bytes(self.mem.read(addr, DMA_BYTES), "little")
                     self.reads.append(addr)
 
     # ---------------------------------------------------------------- bus
@@ -229,9 +230,10 @@ class Testbench:
 
         cycles = await self.read(CYCLES)
         if valid:
-            assert cycles == expected_cycles(regs, ctrl), (
-                f"CYCLES {cycles} != {expected_cycles(regs, ctrl)} ({what})")
-            assert self.reads == expected_reads(regs, ctrl), f"DMA read sequence ({what})"
+            want = expected_cycles(regs, ctrl, DMA_BYTES)
+            assert cycles == want, f"CYCLES {cycles} != {want} ({what})"
+            assert self.reads == expected_reads(regs, ctrl, DMA_BYTES), (
+                f"DMA read sequence ({what})")
         else:
             assert cycles == 0, f"CYCLES {cycles} after a rejected operation"
             assert not self.reads and not self.writes, f"memory traffic on ERR ({what})"
@@ -478,6 +480,34 @@ async def test_strides(dut):
 
 
 @cocotb.test()
+async def test_misaligned_rows(dut):
+    """Rows starting at every 4-byte offset of a DMA block, strides that shift it."""
+    tb = await Testbench.create(dut, "misaligned")
+    rng = tb.rng
+    ks = sorted({max(1, min(k, KMAX)) for k in (1, 3, 4, 5, 8, 12, 13, 16, 17, 31, 60,
+                                                 KMAX - 1, KMAX)})
+    for k in ks:
+        for a_off in range(0, 16, 4):
+            m = ARR if a_off == 0 else rng.randint(1, ARR)
+            n = ARR if a_off == 4 else rng.randint(1, ARR)
+            out_int8 = rng.random() < 0.5
+            out_bytes = n if out_int8 else 4 * n
+            # Strides of every residue mod 16 move the start offset between rows.
+            a_stride = round4(k) + 4 * rng.randint(0, 7)
+            b_stride = round4(k) + 4 * rng.randint(0, 7)
+            c_stride = round4(out_bytes) + 4 * rng.randint(0, 7)
+            await tb.run_op(Op(
+                a=tb.matrix(m, k), b=tb.matrix(n, k),
+                bias=tb.np_rng.integers(-5000, 5000, size=n, dtype=np.int64),
+                a_addr=A_REGION + 64 * rng.randint(0, 99) + a_off,
+                b_addr=B_REGION + 64 * rng.randint(0, 99) + rng.choice([0, 4, 8, 12]),
+                c_addr=C_REGION + 64 * rng.randint(0, 99) + rng.choice([0, 4, 8, 12]),
+                bias_addr=BIAS_REGION + 64 * rng.randint(0, 99) + rng.choice([0, 4, 8, 12]),
+                a_stride=a_stride, b_stride=b_stride, c_stride=c_stride,
+                quant=quant(10, out_int8)))
+
+
+@cocotb.test()
 async def test_k_split(dut):
     """NO_WB, ACC_KEEP|NO_WB, ACC_KEEP over K chunks equals one long product."""
     tb = await Testbench.create(dut, "k_split")
@@ -559,8 +589,8 @@ async def test_busy_writes(dut):
     m = n = ARR
     k = min(256, KMAX)
     probe = Op(a=tb.matrix(m, k), b=tb.matrix(n, k), bias=np.arange(n))
-    load = len(expected_reads(probe.regs, 0)) + 1
-    compute = k + m + n + 1
+    load = len(expected_reads(probe.regs, 0, DMA_BYTES)) + 1
+    compute = k + m + n + 2
     write_back = m * n + 6
     # START first: the write that matters most. Then everything else.
     junk = [(CTRL, CTRL_START | CTRL_ACC_KEEP)]
@@ -598,8 +628,12 @@ async def test_int8_byte_enables(dut):
             tb.mem.write(C_REGION, tb.rng.randbytes(4096))
             await tb.run_op(Op(a=tb.matrix(m, k), b=tb.matrix(n, k), c_stride=c_stride,
                                quant=quant(7, True)))
+            # Write-back writes one 32-bit word at most: the enables are a
+            # run of 1..4 bytes from the start of a single word lane.
             for addr, be, _ in tb.writes:
-                assert be in (0b0001, 0b0011, 0b0111, 0b1111), f"byte enables {be:04b}"
+                lanes = [(be >> (4 * w)) & 0xF for w in range(DMA_BYTES // 4)]
+                used = [x for x in lanes if x]
+                assert len(used) == 1 and used[0] in (1, 3, 7, 15), f"byte enables {be:b}"
 
 
 @cocotb.test()
@@ -631,7 +665,7 @@ async def test_cycles(dut):
                           ("NO_WB", {"ctrl": CTRL_NO_WB})):
             cycles = await tb.run_op(Op(a=tb.matrix(m, k), b=tb.matrix(n, k), **kw))
             rows.append((m, n, k, label, cycles, m * n * k / cycles))
-    lines = [f"ARR={ARR} KMAX={KMAX}", "",
+    lines = [f"ARR={ARR} KMAX={KMAX} DMA_BYTES={DMA_BYTES}", "",
              "| M | N | K | output | CYCLES | MACs/cycle |", "|---|---|---|---|---|---|"]
     lines += [f"| {m} | {n} | {k} | {label} | {c} | {r:.2f} |" for m, n, k, label, c, r in rows]
     for line in lines:

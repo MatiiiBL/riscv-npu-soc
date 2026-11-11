@@ -1,7 +1,7 @@
 # cocotb unit tests for npu_top on Verilator (see test_npu.py).
 #
-#   make                 build and run the suite for ARR=8 and ARR=4
-#   make ARRS=8          only one configuration
+#   make                 build and run every configuration (ARR:DMA_BYTES)
+#   make CONFIGS=8:16    only one configuration
 #   make SEED=7 OPS=1000 another random seed / longer regression
 #   make TEST=test_k_split
 #
@@ -9,13 +9,13 @@
 
 include ../../mk/toolchain.mk
 
-ARRS ?= 8 4
+CONFIGS ?= 8:4 8:8 8:16 4:16
 KMAX ?= 1024
 SEED ?= 1
 OPS  ?= 300
 TEST ?=
 
-RUN_ARGS := $(foreach a,$(ARRS),--arr $(a)) --kmax $(KMAX) --seed $(SEED) \
+RUN_ARGS := $(foreach c,$(CONFIGS),--config $(c)) --kmax $(KMAX) --seed $(SEED) \
             --random-ops $(OPS) $(foreach t,$(TEST),--test $(t))
 
 .PHONY: all test waves clean
