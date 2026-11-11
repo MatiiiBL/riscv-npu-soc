@@ -394,3 +394,23 @@ TEST(npu_dma_sees_only_dmem) {
     soc.store(NPU_CTRL, NPU_CTRL_START, 0xf);
     CHECK_EQ(soc.load(0x10000010), 4u);
 }
+
+TEST(npu_ctrl_reuse_hints_change_nothing) {
+    // CTRL bits 3 (B_KEEP) and 4 (A_KEEP) only let the hardware skip
+    // reloading an operand; the model always reads memory, and the result
+    // must equal a plain START.
+    constexpr uint32_t kReuseHints = (1u << 3) | (1u << 4);
+    Bench t;
+    t.put8(kA, {1, 2, 3, 0, -1, -2, -3, 0});
+    t.put8(kB, {4, 5, 6, 0, -7, 8, -9, 0});
+    t.shape(2, 2, 3, 8);
+    CHECK_EQ(t.start(), kDone);
+    t.put8(kA, {2, 0, 0, 0});  // A changed in memory: it must be read again
+    CHECK_EQ(t.start(kReuseHints), kDone);
+    CHECK_EQ(t.c32(kC + 0), 8);     // 2*4
+    CHECK_EQ(t.c32(kC + 4), -14);   // 2*-7
+    CHECK_EQ(t.c32(kC + 8), -32);
+    CHECK_EQ(t.c32(kC + 12), 18);
+    CHECK_EQ(t.start(kReuseHints | NPU_CTRL_ACC_KEEP), kDone);
+    CHECK_EQ(t.c32(kC + 0), 16);
+}

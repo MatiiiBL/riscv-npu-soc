@@ -57,6 +57,8 @@ uint32_t Npu::read(uint32_t offset) const {
 }
 
 // The spec ignores register writes while BUSY; this model is never busy.
+// CTRL bits other than START, ACC_KEEP and NO_WB only affect hardware timing
+// (operand-reuse hints), so the model ignores them and always reads memory.
 void Npu::write(uint32_t offset, uint32_t value) {
     switch (offset) {
     case kCtrl:
