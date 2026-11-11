@@ -5,7 +5,7 @@ include mk/toolchain.mk
 
 .PHONY: all sim iss sw riscv-tests lint venv \
         test test-iss test-isa test-isa-iss test-isa-rtl test-core test-variants \
-        test-npu test-sw test-sw-arr test-random bench synth clean
+        test-npu test-sw test-random bench synth clean
 
 all: sim iss sw riscv-tests
 
@@ -56,25 +56,10 @@ test-npu:
 test-sw: sim iss sw
 	$(MAKE) -C sw test
 
-# The NPU driver reads ARR from the INFO register, so its tests must also
-# pass on array sizes other than the built-in 8. The ISS takes the size as a
-# flag; the tests check their own results, so the exit code decides.
-NPU_TEST_ARRS ?= 4 5 6
-test-sw-arr: iss sw
-	@status=0; \
-	for a in $(NPU_TEST_ARRS); do \
-	  for t in npu_gemm npu_ksplit; do \
-	    out=$(BUILD_DIR)/sw/$$t.iss_arr$$a.out; \
-	    if $(ISS) --quiet --npu-arr $$a $(BUILD_DIR)/sw/$$t.elf > $$out; then echo "PASS $$t on iss --npu-arr $$a"; \
-	    else echo "FAIL $$t on iss --npu-arr $$a (output in $$out)"; status=1; fi; \
-	  done; \
-	done; \
-	exit $$status
-
 test-random: sim iss
 	$(MAKE) -C verif/random
 
-test: lint test-iss test-isa test-core test-variants test-npu test-sw test-sw-arr test-random
+test: lint test-iss test-isa test-core test-variants test-npu test-sw test-random
 
 bench: sim sw
 	$(MAKE) -C sw bench

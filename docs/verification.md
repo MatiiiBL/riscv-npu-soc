@@ -10,8 +10,7 @@ has to slip past more than one independent check to reach the board:
 | Simulator variants | both predictor builds, random initial state, the real serial UART | each other, and the riscv-tests and firmware checks | `verif/core/` | `make test-variants` |
 | Core, random | constrained-random RV32IM programs | ISS, commit log line by line | `verif/random/`, `tools/rvgen/`, `tools/difftest.py` | `make test-random` |
 | NPU unit | cocotb tests of `npu_top` | Python golden model | `verif/npu/` | `make test-npu` |
-| Firmware | C tests, including NPU driver tests | `expected.txt`, on both simulators | `sw/tests/` | `make test-sw` |
-| NPU driver portability | the NPU firmware tests with `ARR` = 4, 5, 6 | the tests' own software reference, on the ISS | `sw/tests/npu_*` | `make test-sw-arr` |
+| Firmware | C tests, including NPU driver tests | `expected.txt`, on both simulators; the NPU tests also on the ISS with other array sizes, by their own software reference | `sw/tests/` | `make test-sw` |
 | Reference model | ISS decode/execute and NPU model | hand-computed values | `tools/iss/test/` | `make test-iss` |
 | RTL hygiene | Verilator lint | `-Wall` clean | `rtl/` | `make lint` |
 
@@ -341,7 +340,7 @@ mini libc, the NPU driver). Firmware that does neither can also go through
 
 | Job | Runs |
 |-----|------|
-| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make test-iss`, `make test-isa-iss`, a check that the riscv-tests refuse to run without their submodule, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`), `make test-sw-arr`, 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
+| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make test-iss`, `make test-isa-iss`, a check that the riscv-tests refuse to run without their submodule, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`, the NPU tests also with other array sizes), 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
 | `NPU (lint, cocotb)` | `make lint` for every RTL top, `make test-npu` |
 | `RTL (<test>)` | one job each, in parallel: `make test-isa-rtl`, the riscv-tests on `soc_sim_bp0`, `make test-core`, `bp-compare`, `randreset`, `uart-serial`, `make test-sw`, the firmware tests on `soc_sim_dma4`, `make test-random`, and the random difftest on `soc_sim_bp0` |
 | `Synthesis (Yosys, ECP5)` | `synth_ecp5` of `npu_top` and `soc_top` with the cell counts in the job summary, then the ULX3S place and route, timing report and bitstream |

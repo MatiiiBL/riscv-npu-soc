@@ -47,10 +47,9 @@ jobs:
             echo "::error::verif/riscv-tests ran without its test sources"; exit 1
           fi
           grep "git submodule update" "$RUNNER_TEMP/rt.log"
+      # Includes the NPU tests with other array sizes (sw/Makefile NPU_ARRS).
       - name: Firmware tests on the ISS
         run: make -j"$(nproc)" -C sw test SIMS=build/iss/iss
-      - name: NPU firmware tests with ARR = 4, 5, 6
-        run: make -j"$(nproc)" test-sw-arr
       - name: Random difftest, ISS against itself
         run: make -C verif/random -j"$(nproc)" SEEDS=100 LEN=2000 RTL_SIM=build/iss/iss
       - name: difftest self-test
