@@ -54,7 +54,10 @@ bug. Change the document in the same commit as the behavior.
   `time`/`timeh` (0xC01/0xC81) read as `cycle`/`cycleh`. Every other CSR
   reads as 0. `cycle` values are implementation-defined, so tests that compare
   the ISS with the RTL must not depend on them. `instret` counts retired
-  instructions and must match between the ISS and the RTL.
+  instructions and must match between the ISS and the RTL. A counter read
+  returns the value from before the reading instruction retires, so `instret`
+  reads the number of instructions retired before the CSR instruction (as in
+  Spike). The ISS has no clock and reports `instret` for `cycle` and `time`.
 - `FENCE` and `FENCE.I` execute as no-ops.
 - **No traps or interrupts.** `ECALL`, `EBREAK` and illegal instructions
   *halt* the core when they reach WB (see section 7 for exit codes).
@@ -71,8 +74,11 @@ bug. Change the document in the same commit as the behavior.
 | `0x3000_0000` | 4 KiB   | NPU    | NPU registers, section 5. |
 
 Decoding uses address bits `[31:28]`. Data accesses to any other address
-(including IMEM) read 0 and ignore writes. All MMIO and NPU registers are
-32-bit and must be accessed with `lw`/`sw`.
+(including IMEM) read 0 and ignore writes. Only the listed sizes are backed,
+with no aliasing: addresses past the end of a region (e.g. `0x1004_0000`,
+`0x2000_1000`) and undefined MMIO or NPU offsets also read 0 and ignore
+writes. All MMIO and NPU registers are 32-bit and must be accessed with
+`lw`/`sw`.
 
 | Address       | Name          | Access | Meaning |
 |---------------|---------------|--------|---------|
@@ -80,6 +86,9 @@ Decoding uses address bits `[31:28]`. Data accesses to any other address
 | `0x2000_0004` | `UART_STATUS` | R      | bit 0: TX ready (always 1 in simulation) |
 | `0x2000_0010` | `SIM_EXIT`    | W      | end the simulation with this exit code (0 = pass) |
 | `0x2000_0020` | `LEDS`        | RW     | low 8 bits drive board LEDs |
+
+Write-only registers read 0, `UART_STATUS` reads exactly 1 and `LEDS` reads
+back `{24'b0, leds}`.
 
 The header `sw/common/soc_map.h` is the single source of these numbers for
 firmware.
@@ -167,6 +176,8 @@ DMA accesses outside DMEM read 0 and drop writes.
 ## 5. NPU programming model
 
 Registers (offsets from `0x3000_0000`). All reset to 0 except `QMULT` (1).
+RW registers read back the full 32-bit value written, and the range checks on
+`M`, `N` and `K` in 5.1 use that full value.
 
 | Offset | Name        | Access | Meaning |
 |--------|-------------|--------|---------|
@@ -278,11 +289,13 @@ instructions on the ISS; the default is 100,000,000.
 - **stdout** carries exactly the bytes written to `UART_TX`, nothing else.
 - **stderr** carries diagnostics and, unless `--quiet`, one summary line:
   `[rtl] cycles=<n> instret=<n> cpi=<x.xxx> exit=<hex>` or
-  `[iss] instret=<n> exit=<hex>`.
+  `[iss] instret=<n> exit=<hex>`. `exit=` is `0x%08x` of the value written to
+  `SIM_EXIT`, or the process exit code (2, 3 or 124) for the other endings.
 - The run ends after the store to `SIM_EXIT` retires. Process exit code:
   `0` if the value written is 0, otherwise `value & 0xff`, or `1` if that is 0.
 - Other endings: halt on `ECALL`/`EBREAK` -> exit code `2`; illegal
-  instruction -> `3`; `--max-cycles` exceeded -> `124`.
+  instruction -> `3`; `--max-cycles` exceeded -> `124`. Usage and ELF-load
+  errors exit with `125`.
 
 ### 7.2 Commit log
 
