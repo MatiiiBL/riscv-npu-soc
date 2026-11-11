@@ -180,9 +180,9 @@ failing seed keeps its `.S`, `.elf`, both commit logs, stdout, stderr and the
 difftest report in `build/random/fail/`.
 
 `make selftest` tests the tester. `fault_sim.py` wraps the ISS and corrupts its
-result the way a broken RTL would: a wrong `rd_wdata`, store data or pc, a
-dropped, duplicated or missing instruction, a changed UART byte, a different
-exit code. `selftest.py` checks that difftest flags each fault at the right
+result the way a broken RTL would: a wrong `rd_wdata`, store data, load
+address or pc, a dropped, duplicated or missing instruction, a changed UART
+byte, a different exit code. `selftest.py` checks that difftest flags each fault at the right
 line and field, and that the unmodified run matches.
 
 ### 4.4 Debugging a mismatch
@@ -218,8 +218,11 @@ difftest FAIL: build/random/selftest.elf
    - an `rtl` log that runs ahead (an extra line) or behind (a missing line):
      the retirement logic dropped or duplicated an instruction, usually
      around a stall or a flush. The `then` lines show which.
-   - `mem_addr`, `wmask`, `wdata`: store address, byte enables or store-data
-     forwarding.
+   - `mem_addr`: the address of a load or store (every memory access is
+     logged with its word address, spec 7.2), so suspect forwarding into the
+     address or the immediate. A load can return the right data from the
+     wrong address, which only this field shows.
+   - `wmask`, `wdata`: a store's byte enables or store-data forwarding.
    - `the rtl log ends here`: the RTL stopped early (illegal instruction,
      `--max-cycles`); its stderr is at the end of the report.
    - only `stdout` or the exit code differs: the UART or `SIM_EXIT` path.

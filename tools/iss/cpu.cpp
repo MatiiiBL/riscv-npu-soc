@@ -109,7 +109,11 @@ StopReason Cpu::run_loop(uint64_t max_instret, CommitLog* log) {
         const uint32_t rs2 = x[d.rs2];
         uint32_t next_pc = pc + 4;
         uint32_t val = 0;
+        // Loads and stores log their word address; only stores have a byte
+        // mask and data (both 0 for a load).
+        bool is_mem = false;
         bool is_store = false;
+        uint32_t mem_addr = 0;
         uint32_t store_be = 0;
         uint32_t store_data = 0;
         bool halt = false;
@@ -137,6 +141,8 @@ StopReason Cpu::run_loop(uint64_t max_instret, CommitLog* log) {
             case Op::kLhu: val = data & 0xffffu; misaligned_ += addr & 1; break;
             default: val = data; misaligned_ += (addr & 3) != 0; break;
             }
+            is_mem = true;
+            mem_addr = addr & ~3u;
             break;
         }
 
@@ -155,10 +161,11 @@ StopReason Cpu::run_loop(uint64_t max_instret, CommitLog* log) {
             } else {
                 misaligned_ += lane != 0;
             }
+            is_mem = true;
             is_store = true;
+            mem_addr = addr & ~3u;
             store_be = (mask << lane) & 0xfu;
             store_data = data << (8 * lane);
-            val = addr & ~3u;  // only for the log; stores have rd == 0
             soc_.store(addr, store_data, store_be);
             break;
         }
@@ -206,8 +213,8 @@ StopReason Cpu::run_loop(uint64_t max_instret, CommitLog* log) {
         }
         instret++;
         if (kLog) {
-            if (is_store) {
-                log->retire_store(pc, d.raw, val, store_be, store_data);
+            if (is_mem) {
+                log->retire_mem(pc, d.raw, d.rd, val, mem_addr, store_be, store_data);
             } else {
                 log->retire(pc, d.raw, d.rd, val);
             }

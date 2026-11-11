@@ -458,10 +458,33 @@ TEST(commit_log_matches_spec_format) {
                  "00000018 00b52023 00 00000000 M 10000000 f 00000017\n"
                  "0000001c 00b51123 00 00000000 M 10000000 c 00170000\n"
                  "00000020 00b501a3 00 00000000 M 10000000 8 17000000\n"
-                 "00000024 00052603 12 17170017\n"
+                 "00000024 00052603 12 17170017 M 10000000 0 00000000\n"
                  "00000028 200002b7 05 20000000\n"
                  "0000002c 0002a823 00 00000000 M 20000010 f 00000000\n");
     CHECK_EQ(m.cpu.instret(), 12u);
+}
+
+TEST(commit_log_records_load_addresses) {
+    Machine m;
+    m.dmem(0x1003fffc, {0x11, 0x22, 0x33, 0x84});  // last word of DMEM
+    m.program({
+        0x200002b7,  // 00: lui t0, 0x20000
+        0x0042a503,  // 04: lw a0, 4(t0)    UART_STATUS
+        0x00002003,  // 08: lw zero, 0(zero) IMEM reads 0, rd x0
+        0x10040337,  // 0c: lui t1, 0x10040 just past DMEM
+        0x00334583,  // 10: lbu a1, 3(t1)   unbacked, reads 0
+        0xffe31603,  // 14: lh a2, -2(t1)   lane 2 of the last DMEM word
+        0x0202a683,  // 18: lw a3, 32(t0)   LEDS
+    });
+    const std::string log = m.run_logged(7);
+    CHECK_STR_EQ(log,
+                 "00000000 200002b7 05 20000000\n"
+                 "00000004 0042a503 10 00000001 M 20000004 0 00000000\n"
+                 "00000008 00002003 00 00000000 M 00000000 0 00000000\n"
+                 "0000000c 10040337 06 10040000\n"
+                 "00000010 00334583 11 00000000 M 10040000 0 00000000\n"
+                 "00000014 ffe31603 12 ffff8433 M 1003fffc 0 00000000\n"
+                 "00000018 0202a683 13 00000000 M 20000020 0 00000000\n");
 }
 
 TEST(writes_to_x0_are_dropped_and_logged_as_none) {

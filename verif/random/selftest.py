@@ -24,6 +24,7 @@ FAULT_SIM = HERE / "fault_sim.py"
 EXPECT = {
     "rd_wdata": ["differs at line {line} ", "fields: rd_wdata"],
     "wdata": ["differs at line {line} ", "fields: wdata"],
+    "load_addr": ["differs at line {line} ", "fields: mem_addr"],
     "pc": ["differs at line {line} ", "fields: pc"],
     "drop": ["differs at line {line} "],
     "extra": ["differs at line {line} "],

@@ -370,16 +370,20 @@ With `--commit-log FILE`, each retired instruction appends one line:
   `rd`: 2 decimal digits; `wmask`: 1 hex digit.
 - `rd` is `00` and `rd_wdata` is `00000000` when no register is written
   (including writes to x0).
-- The ` M ...` suffix appears only for stores; `mem_addr` is word aligned and
-  `wdata` holds the store data in its byte lanes (other lanes 0).
+- The ` M ...` suffix appears for every load and store, and only for them.
+  `mem_addr` is the word-aligned address (`addr & ~3`), also when the access
+  reads 0 or is dropped (IMEM, unbacked addresses). For a store, `wmask` is
+  its byte mask and `wdata` holds the store data in its byte lanes (other
+  lanes 0); for a load, `wmask` is `0` and `wdata` is `00000000`.
 - The `SIM_EXIT` store is the last line. A halting `ECALL`/`EBREAK`/illegal
   instruction is logged as the last line with `rd` = `00`.
 
-Example:
+Example (a `lui`, a store and a load of the same word):
 
 ```
 00000010 10000537 10 10000000
 00000018 00b52023 00 00000000 M 10000000 f 00000017
+0000001c 00052583 11 00000017 M 10000000 0 00000000
 ```
 
 The RTL log comes from the retirement port; the ISS log from its execute

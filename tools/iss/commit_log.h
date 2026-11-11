@@ -20,8 +20,8 @@ public:
     CommitLog(const CommitLog&) = delete;
     CommitLog& operator=(const CommitLog&) = delete;
 
-    // An instruction that is not a store. `rd` is 0 when no register is
-    // written, and then `rd_wdata` is ignored.
+    // An instruction that does not access memory. `rd` is 0 when no
+    // register is written, and then `rd_wdata` is ignored.
     void retire(uint32_t pc, uint32_t insn, unsigned rd, uint32_t rd_wdata) {
         char* p = reserve();
         p = put_common(p, pc, insn, rd, rd_wdata);
@@ -29,10 +29,13 @@ public:
         len_ = static_cast<size_t>(p - buf_);
     }
 
-    // A store: `addr` is the word-aligned address, `wdata` in its lanes.
-    void retire_store(uint32_t pc, uint32_t insn, uint32_t addr, uint32_t wmask, uint32_t wdata) {
+    // A load or a store: `addr` is the word-aligned address. A store has
+    // rd 0, its byte mask and its data in their lanes; a load has its rd,
+    // wmask 0 and wdata 0.
+    void retire_mem(uint32_t pc, uint32_t insn, unsigned rd, uint32_t rd_wdata, uint32_t addr, uint32_t wmask,
+                    uint32_t wdata) {
         char* p = reserve();
-        p = put_common(p, pc, insn, 0, 0);
+        p = put_common(p, pc, insn, rd, rd_wdata);
         *p++ = ' ';
         *p++ = 'M';
         *p++ = ' ';

@@ -10,6 +10,8 @@ points at the right place:
   none       pass everything through unchanged
   rd_wdata   flip bit 0 of rd_wdata on the first register write at/after --line
   wdata      flip bit 0 of the store data on the first store at/after --line
+  load_addr  move the address of the first load at/after --line to the next
+             word (a load that read the right data from the wrong place)
   pc         add 4 to the pc of line --line
   drop       delete line --line (an instruction that never retired)
   extra      duplicate line --line (an instruction that retired twice)
@@ -22,13 +24,20 @@ import argparse
 import subprocess
 import sys
 
-FAULTS = ["none", "rd_wdata", "wdata", "pc", "drop", "extra", "truncate", "stdout", "exit"]
+FAULTS = ["none", "rd_wdata", "wdata", "load_addr", "pc", "drop", "extra", "truncate", "stdout", "exit"]
+LOG_FAULTS = ["rd_wdata", "wdata", "load_addr", "pc", "drop", "extra", "truncate"]
 
 
-def flip_field(line, index):
+def flip_field(line, index, bit=1):
     parts = line.split(" ")
-    parts[index] = f"{int(parts[index], 16) ^ 1:08x}"
+    parts[index] = f"{int(parts[index], 16) ^ bit:08x}"
     return " ".join(parts)
+
+
+def is_mem(line, store):
+    """A load or store line (spec 7.2): stores have a nonzero byte mask."""
+    parts = line.split(" ")
+    return len(parts) == 8 and (parts[6] != "0") == store
 
 
 def corrupt_log(path, fault, at):
@@ -41,8 +50,11 @@ def corrupt_log(path, fault, at):
         i = next(k for k in range(i, len(lines)) if lines[k].split(" ")[2] != "00")
         lines[i] = flip_field(lines[i], 3)
     elif fault == "wdata":
-        i = next(k for k in range(i, len(lines)) if " M " in lines[k])
+        i = next(k for k in range(i, len(lines)) if is_mem(lines[k], store=True))
         lines[i] = flip_field(lines[i], 7)
+    elif fault == "load_addr":
+        i = next(k for k in range(i, len(lines)) if is_mem(lines[k], store=False))
+        lines[i] = flip_field(lines[i], 5, bit=4)
     elif fault == "pc":
         parts = lines[i].split(" ")
         parts[0] = f"{int(parts[0], 16) + 4:08x}"
@@ -73,7 +85,7 @@ def main():
 
     proc = subprocess.run(sim, stdout=subprocess.PIPE)
     stdout, code = proc.stdout, proc.returncode
-    if args.fault in ("rd_wdata", "wdata", "pc", "drop", "extra", "truncate"):
+    if args.fault in LOG_FAULTS:
         corrupt_log(sim[sim.index("--commit-log") + 1], args.fault, args.line)
     elif args.fault == "stdout":
         stdout = stdout[:-1] + bytes([stdout[-1] ^ 0x20]) if stdout else b"?"
