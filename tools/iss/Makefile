@@ -20,6 +20,7 @@ OUT      := $(BUILD_DIR)/iss
 OBJ_DIR  := $(OUT)/obj
 LIB_SRCS := commit_log.cpp cpu.cpp decode.cpp elf.cpp memory.cpp npu.cpp soc.cpp
 LIB_OBJS := $(addprefix $(OBJ_DIR)/,$(LIB_SRCS:.cpp=.o))
+TEST_OBJS := $(addprefix $(OBJ_DIR)/,test_main.o test_cpu.o test_npu.o)
 ISS      := $(OUT)/iss
 TEST_BIN := $(OUT)/iss_test
 
@@ -29,7 +30,7 @@ all: $(ISS)
 $(ISS): $(LIB_OBJS) $(OBJ_DIR)/main.o
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ -o $@
 
-$(TEST_BIN): $(LIB_OBJS) $(OBJ_DIR)/iss_test.o
+$(TEST_BIN): $(LIB_OBJS) $(TEST_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ -o $@
 
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
