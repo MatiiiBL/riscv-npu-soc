@@ -13,9 +13,13 @@ SW_COMMON := $(REPO_ROOT)/sw/common
 SW_OUT    := $(BUILD_DIR)/sw
 OBJ_DIR   := $(SW_OUT)/obj/$(PROG)
 
+# -MMD -MP write a .d file of header dependencies next to each object, so
+# editing any included header (sw/common, sw/lib or the program's own)
+# rebuilds what uses it.
 OPT      ?= -O2
-CFLAGS   += $(RV_FLAGS) $(OPT) -g -std=c11 -Wall -Wextra -I$(SW_COMMON) $(EXTRA_CFLAGS)
-ASFLAGS  += $(RV_FLAGS) -I$(SW_COMMON)
+DEPFLAGS := -MMD -MP
+CFLAGS   += $(RV_FLAGS) $(OPT) -g -std=c11 -Wall -Wextra -I$(SW_COMMON) $(EXTRA_CFLAGS) $(DEPFLAGS)
+ASFLAGS  += $(RV_FLAGS) -I$(SW_COMMON) $(DEPFLAGS)
 LDFLAGS  += $(RV_FLAGS) $(RV_LDFLAGS) -T$(SW_COMMON)/link.ld
 
 COMMON_SRCS := $(SW_COMMON)/crt0.S $(SW_COMMON)/lib.c
@@ -29,10 +33,10 @@ vpath %.S $(sort $(dir $(abspath $(ALL_SRCS))))
 .PHONY: all clean
 all: $(ELF) $(ELF:.elf=.dis) $(ELF:.elf=.bin)
 
-$(OBJ_DIR)/%.o: %.c $(wildcard $(SW_COMMON)/*.h) | $(OBJ_DIR)
+$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
 	$(RV_CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/%.o: %.S $(SW_COMMON)/soc_map.h | $(OBJ_DIR)
+$(OBJ_DIR)/%.o: %.S | $(OBJ_DIR)
 	$(RV_CC) $(ASFLAGS) -c $< -o $@
 
 $(ELF): $(OBJS) $(SW_COMMON)/link.ld
@@ -50,3 +54,5 @@ $(OBJ_DIR):
 
 clean:
 	rm -rf $(OBJ_DIR) $(ELF) $(ELF:.elf=.dis) $(ELF:.elf=.bin)
+
+-include $(OBJS:.o=.d)
