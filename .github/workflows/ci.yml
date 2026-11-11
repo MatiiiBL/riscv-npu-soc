@@ -137,6 +137,9 @@ jobs:
             build/sw/*.out
           if-no-files-found: ignore
 
+  # Synthesis of the NPU and the SoC on their own, then the full ULX3S flow:
+  # place and route of the board top with the hello firmware in block RAM,
+  # timing against the board clock, and the bitstream.
   synth:
     name: Synthesis (Yosys, ECP5)
     runs-on: ubuntu-24.04
@@ -144,16 +147,42 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
-      # soc_top is synthesized with the hello firmware as its memory image
-      # (rtl/Makefile synth-check), so it needs the firmware toolchain too.
+      # The SoC and the board are synthesized with the hello firmware as
+      # their memory image, so the job needs the firmware toolchain too. The
+      # OSS CAD Suite (hdl) brings nextpnr-ecp5 and ecppack along with Yosys.
       - uses: ./.github/actions/setup
         with:
           hdl: true
-          firmware: ${{ hashFiles('rtl/soc/soc.f') != '' }}
+          firmware: true
       - name: npu_top
         run: python3 .github/scripts/synth_report.py --top npu_top --filelist rtl/npu/npu.f
       - name: soc_top
-        if: hashFiles('rtl/soc/soc.f') != ''
         run: |
           make -C rtl synth-check
           python3 .github/scripts/synth_report.py --top soc_top --stat build/synth-check/stat.txt
+      - name: Lint the ULX3S board top
+        run: make -C fpga lint
+      - name: ULX3S bitstream (hello)
+        run: |
+          nextpnr-ecp5 --version
+          make -C fpga FW=hello
+      - name: ULX3S utilization and timing
+        run: make -C fpga report
+      - name: Keep the bitstream
+        uses: actions/upload-artifact@v7
+        with:
+          name: ulx3s-hello
+          path: |
+            build/fpga/pulse_hello.bit
+            build/fpga/hello/report.json
+            build/fpga/hello/nextpnr.log
+          if-no-files-found: error
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ulx3s-logs
+          path: |
+            build/fpga/hello/*.log
+            build/fpga/hello/report.json
+          if-no-files-found: ignore
