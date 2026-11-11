@@ -28,7 +28,8 @@ from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge
 
 from npu_model import (A_ADDR, A_STRIDE, B_ADDR, B_STRIDE, BIAS_ADDR, C_ADDR,
-                       C_STRIDE, CTRL, CTRL_ACC_KEEP, CTRL_NO_WB, CTRL_START,
+                       C_STRIDE, CTRL, CTRL_A_KEEP, CTRL_ACC_KEEP, CTRL_B_KEEP,
+                       CTRL_NO_WB, CTRL_START,
                        CYCLES, DMEM_BASE, DMEM_SIZE, INFO, MASK32, QMULT,
                        QUANT, REG_NAMES, RW_REGS, STATUS, STATUS_BUSY,
                        STATUS_DONE, STATUS_ERR, Dmem, K, M, N, NpuModel,
@@ -123,6 +124,15 @@ class Testbench:
         d.rst_n.value = 1
         self.model.reset()
         cocotb.start_soon(self._dmem())
+
+    async def pulse_reset(self) -> None:
+        """Reset the NPU again in the middle of a test."""
+        d = self.dut
+        await FallingEdge(d.clk)
+        d.rst_n.value = 0
+        await self.idle(2)
+        d.rst_n.value = 1
+        self.model.reset()
 
     async def _dmem(self) -> None:
         """DMEM port B: sample the request mid-cycle, answer reads next cycle."""
@@ -230,10 +240,11 @@ class Testbench:
 
         cycles = await self.read(CYCLES)
         if valid:
-            want = expected_cycles(regs, ctrl, DMA_BYTES)
+            loaded = self.model.loaded
+            want = expected_cycles(regs, ctrl, DMA_BYTES, loaded)
             assert cycles == want, f"CYCLES {cycles} != {want} ({what})"
-            assert self.reads == expected_reads(regs, ctrl, DMA_BYTES), (
-                f"DMA read sequence ({what})")
+            assert self.reads == expected_reads(regs, ctrl, DMA_BYTES, loaded), (
+                f"DMA read sequence, loaded {loaded} ({what})")
         else:
             assert cycles == 0, f"CYCLES {cycles} after a rejected operation"
             assert not self.reads and not self.writes, f"memory traffic on ERR ({what})"
@@ -266,14 +277,23 @@ class Testbench:
         assert size <= QUARTER
         return region + 4 * self.rng.randrange((QUARTER - size) // 4 + 1)
 
-    def random_op(self, ctrl: int | None = None) -> Op:
+    def random_op(self, prev: Op | None = None) -> Op:
+        """A random valid operation. With `prev`, it may reuse prev's A and/or B
+        (same data, address, stride, rows and K) so that A_KEEP / B_KEEP hit."""
         rng = self.rng
-        m, n = rng.randint(1, ARR), rng.randint(1, ARR)
-        k = rng.choice([rng.randint(1, 8), rng.randint(1, 64), rng.randint(1, KMAX),
-                        rng.choice([KMAX - 1, KMAX])])
-        k = max(1, min(k, KMAX))
+        reuse_a = prev is not None and rng.random() < 0.25
+        reuse_b = prev is not None and rng.random() < 0.25
+        if reuse_a or reuse_b:
+            k = prev.regs[K]
+        else:
+            k = rng.choice([rng.randint(1, 8), rng.randint(1, 64), rng.randint(1, KMAX),
+                            rng.choice([KMAX - 1, KMAX])])
+            k = max(1, min(k, KMAX))
+        m = prev.regs[M] if reuse_a else rng.randint(1, ARR)
+        n = prev.regs[N] if reuse_b else rng.randint(1, ARR)
         kind = rng.choice(["full", "full", "small", "extreme"])
-        a, b = self.matrix(m, k, kind), self.matrix(n, k, kind)
+        a = prev.a if reuse_a else self.matrix(m, k, kind)
+        b = prev.b if reuse_b else self.matrix(n, k, kind)
         bias = None
         if rng.random() < 0.5:
             span = rng.choice([1 << 8, 1 << 20, 1 << 31])
@@ -286,8 +306,8 @@ class Testbench:
         vmax = int(np.abs(a @ b.T).max()) + (int(np.abs(bias).max()) if bias is not None else 0)
         shift = (vmax * abs(qmult)).bit_length() - 7 + rng.randint(-3, 3)
         shift = rng.choice([max(0, min(31, shift)), 0, 1, 31, rng.randint(0, 31)])
-        if ctrl is None:
-            ctrl = rng.choice([0, 0, 0, CTRL_ACC_KEEP, CTRL_NO_WB, CTRL_ACC_KEEP | CTRL_NO_WB])
+        ctrl = rng.choice([0, 0, 0, CTRL_ACC_KEEP, CTRL_NO_WB, CTRL_ACC_KEEP | CTRL_NO_WB])
+        ctrl |= rng.choice([0, 0, CTRL_A_KEEP, CTRL_B_KEEP, CTRL_A_KEEP | CTRL_B_KEEP])
         out_bytes = n if out_int8 else 4 * n
 
         def stride(min_len: int) -> int:
@@ -298,10 +318,12 @@ class Testbench:
                 return round4(min_len)
             return round4(min_len) + 4 * rng.randint(1, 64)
 
-        a_stride, b_stride, c_stride = stride(k), stride(k), stride(out_bytes)
-        return Op(a=a, b=b, bias=bias,
-                  a_addr=self.addr_in(A_REGION, m * max(a_stride, round4(k))),
-                  b_addr=self.addr_in(B_REGION, n * max(b_stride, round4(k))),
+        a_stride = prev.a_stride if reuse_a else stride(k)
+        b_stride = prev.b_stride if reuse_b else stride(k)
+        c_stride = stride(out_bytes)
+        a_addr = prev.a_addr if reuse_a else self.addr_in(A_REGION, m * max(a_stride, round4(k)))
+        b_addr = prev.b_addr if reuse_b else self.addr_in(B_REGION, n * max(b_stride, round4(k)))
+        return Op(a=a, b=b, bias=bias, a_addr=a_addr, b_addr=b_addr,
                   c_addr=self.addr_in(C_REGION, m * max(c_stride, round4(out_bytes))),
                   bias_addr=self.addr_in(BIAS_REGION, 4 * n),
                   a_stride=a_stride, b_stride=b_stride, c_stride=c_stride,
@@ -550,6 +572,98 @@ async def test_acc_keep_partial(dut):
 
 
 @cocotb.test()
+async def test_operand_reuse(dut):
+    """A_KEEP / B_KEEP skip a load only when the buffer holds exactly that operand."""
+    tb = await Testbench.create(dut, "reuse")
+    keep = CTRL_A_KEEP | CTRL_B_KEEP
+    k = min(100, KMAX)
+    a, b = tb.matrix(ARR, k), tb.matrix(ARR, k)
+    base = dict(a=a, b=b, bias=np.arange(ARR), quant=quant(9, True), qmult=3,
+                a_addr=A_REGION + 4, b_addr=B_REGION + 8)
+
+    async def expect(loads_a: bool, loads_b: bool, what: str, **changes):
+        # run_op checks the hardware's reads and CYCLES against the model;
+        # this checks the model against the expectation of the test.
+        await tb.run_op(Op(**{**base, "ctrl": keep, **changes}))
+        got = (tb.model.loaded["A"], tb.model.loaded["B"])
+        assert got == (loads_a, loads_b), f"{what}: loaded A, B = {got}"
+
+    await expect(True, True, "first operation after reset")
+    await expect(False, False, "same operands")
+    await expect(False, False, "same operands, other C, bias, QUANT and ACC_KEEP|NO_WB",
+                 c_addr=C_REGION + 0x400, bias=None, quant=0,
+                 ctrl=keep | CTRL_ACC_KEEP | CTRL_NO_WB)
+    await expect(True, False, "only B_KEEP", ctrl=CTRL_B_KEEP)
+    await expect(False, True, "only A_KEEP", ctrl=CTRL_A_KEEP)
+    await expect(True, True, "no flags", ctrl=0)
+    await expect(False, False, "a load without flags still records the operand")
+
+    misses = [
+        ("A_ADDR", (True, False), dict(a_addr=A_REGION + 4 + 64)),
+        ("A_STRIDE", (True, False), dict(a_stride=round4(k) + 4)),
+        ("B_ADDR", (False, True), dict(b_addr=B_REGION + 8 + 16)),
+        ("B_STRIDE", (False, True), dict(b_stride=round4(k) + 12)),
+        ("K", (True, True), dict(a=a[:, :k - 1], b=b[:, :k - 1])),
+    ]
+    if ARR > 1:
+        misses += [("M", (True, False), dict(a=a[:ARR - 1])),
+                   ("N", (False, True), dict(b=b[:ARR - 1]))]
+    for name, loads, changes in misses:
+        await expect(*loads, f"{name} changed", **changes)
+        await expect(*loads, f"{name} changed back")
+        await expect(False, False, f"{name} unchanged again")
+
+    # A rejected START forgets both buffers.
+    await tb.configure({M: 0})
+    await tb.start(keep, what="ERR")
+    await expect(True, True, "after an ERR operation")
+    await expect(False, False, "loaded again")
+    # So does reset.
+    await tb.pulse_reset()
+    await expect(True, True, "after reset")
+
+
+@cocotb.test()
+async def test_tiled_gemm_keep(dut):
+    """A tiled GEMM keeping the B tile while it walks the rows of A."""
+    tb = await Testbench.create(dut, "tiled_gemm")
+    mt, nt, k = 3 * ARR + 1, max(1, 2 * ARR - 1), min(300, KMAX)
+    out_int8 = ARR % 4 == 0        # INT8 column tiles must start 4-byte aligned
+    elem = 1 if out_int8 else 4
+    q, qmult = quant(13 if out_int8 else 0, out_int8, relu=True), 9
+    a, b = tb.matrix(mt, k), tb.matrix(nt, k)
+    bias = tb.np_rng.integers(-2000, 2000, size=nt, dtype=np.int64)
+    a_stride, b_stride = round4(k) + 4, round4(k) + 8
+    c_stride = round4(nt * elem) + 4
+    m_tiles, n_tiles = -(-mt // ARR), -(-nt // ARR)
+    want = gemm_reference(a, b, bias, q, qmult)
+    totals = {}
+    for flags in (0, CTRL_B_KEEP):
+        tb.mem.write(C_REGION, tb.rng.randbytes(mt * c_stride))
+        cycles = b_loads = 0
+        for n0 in range(0, nt, ARR):
+            for m0 in range(0, mt, ARR):
+                tm, tn = min(ARR, mt - m0), min(ARR, nt - n0)
+                cycles += await tb.run_op(Op(
+                    a=a[m0:m0 + tm], b=b[n0:n0 + tn], bias=bias[n0:n0 + tn],
+                    a_addr=A_REGION + m0 * a_stride, b_addr=B_REGION + n0 * b_stride,
+                    c_addr=C_REGION + m0 * c_stride + n0 * elem,
+                    bias_addr=BIAS_REGION + 4 * n0,
+                    a_stride=a_stride, b_stride=b_stride, c_stride=c_stride,
+                    quant=q, qmult=qmult, ctrl=flags))
+                b_loads += tb.model.loaded["B"]
+        assert b_loads == (n_tiles if flags else n_tiles * m_tiles), f"{b_loads} B loads"
+        for i in range(mt):
+            for j in range(nt):
+                addr = C_REGION + i * c_stride + j * elem
+                got = s8(tb.mem.read(addr, 1)[0]) if out_int8 else s32(tb.mem.read32(addr))
+                assert got == want[i][j], f"C[{i}][{j}] = {got}, want {want[i][j]}"
+        totals[flags] = cycles
+    dut._log.info("tiled %dx%dx%d GEMM: %d cycles, %d with B_KEEP", mt, nt, k,
+                  totals[0], totals[CTRL_B_KEEP])
+
+
+@cocotb.test()
 async def test_errors(dut):
     """Every invalid parameter gives ERR|DONE, no memory traffic, and keeps acc."""
     tb = await Testbench.create(dut, "errors")
@@ -589,7 +703,7 @@ async def test_busy_writes(dut):
     m = n = ARR
     k = min(256, KMAX)
     probe = Op(a=tb.matrix(m, k), b=tb.matrix(n, k), bias=np.arange(n))
-    load = len(expected_reads(probe.regs, 0, DMA_BYTES)) + 1
+    load = len(expected_reads(probe.regs, 0, DMA_BYTES, {"A": True, "B": True})) + 1
     compute = k + m + n + 2
     write_back = m * n + 6
     # START first: the write that matters most. Then everything else.
@@ -638,18 +752,25 @@ async def test_int8_byte_enables(dut):
 
 @cocotb.test()
 async def test_random_regression(dut):
-    """Seeded random operations, including ACC_KEEP / NO_WB sequences."""
+    """Seeded random operations: ACC_KEEP / NO_WB sequences, A_KEEP / B_KEEP hits."""
     tb = await Testbench.create(dut, "regression")
     total_cycles = 0
+    kept = {"A": 0, "B": 0}
+    op = None
     for i in range(RANDOM_OPS):
-        op = tb.random_op()
+        op = tb.random_op(prev=op)
         total_cycles += await tb.run_op(op)
+        for name in kept:
+            kept[name] += not tb.model.loaded[name]
         if i % 50 == 0:
             dut._log.info("op %d: %s", i, op.describe())
+    if RANDOM_OPS >= 100:
+        assert kept["A"] and kept["B"], f"no operand reuse hits: {kept}"
     # Flush all accumulators through a final write-back.
     await tb.run_op(Op(a=np.zeros((ARR, 1), dtype=np.int64), b=tb.matrix(ARR, 1),
                        ctrl=CTRL_ACC_KEEP))
-    dut._log.info("%d random ops, %d NPU cycles", RANDOM_OPS, total_cycles)
+    dut._log.info("%d random ops, %d NPU cycles, A kept %d times, B kept %d times",
+                  RANDOM_OPS, total_cycles, kept["A"], kept["B"])
 
 
 @cocotb.test()
@@ -660,10 +781,13 @@ async def test_cycles(dut):
     rows = []
     for m, n, k in shapes:
         m, n, k = min(m, ARR), min(n, ARR), min(k, KMAX)
+        a, b = tb.matrix(m, k), tb.matrix(n, k)
         for label, kw in (("INT32", {}),
                           ("INT8+bias", {"bias": np.arange(n), "quant": quant(8, True, True)}),
-                          ("NO_WB", {"ctrl": CTRL_NO_WB})):
-            cycles = await tb.run_op(Op(a=tb.matrix(m, k), b=tb.matrix(n, k), **kw))
+                          ("NO_WB", {"ctrl": CTRL_NO_WB}),
+                          ("INT32, B kept", {"ctrl": CTRL_B_KEEP}),
+                          ("INT32, A+B kept", {"ctrl": CTRL_A_KEEP | CTRL_B_KEEP})):
+            cycles = await tb.run_op(Op(a=a, b=b, **kw))
             rows.append((m, n, k, label, cycles, m * n * k / cycles))
     lines = [f"ARR={ARR} KMAX={KMAX} DMA_BYTES={DMA_BYTES}", "",
              "| M | N | K | output | CYCLES | MACs/cycle |", "|---|---|---|---|---|---|"]

@@ -5,6 +5,10 @@ the golden model of docs/spec.md section 5.1: it holds the architectural state
 (registers, status, the ARR x ARR accumulators) and executes one operation at a
 time against a `Dmem`, bit-exactly. It is deliberately written straight from
 the spec pseudocode and shares no code with the hardware's structure.
+
+The model also tracks which operands the A_KEEP / B_KEEP rule lets the NPU
+skip. That never changes results, only which blocks are read and CYCLES, so
+it feeds `expected_reads` and `expected_cycles` alone.
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ REG_NAMES = {
 CTRL_START = 1 << 0
 CTRL_ACC_KEEP = 1 << 1
 CTRL_NO_WB = 1 << 2
+CTRL_B_KEEP = 1 << 3
+CTRL_A_KEEP = 1 << 4
 
 STATUS_BUSY = 1 << 0
 STATUS_DONE = 1 << 1
@@ -128,6 +134,9 @@ class NpuModel:
         self.regs[QMULT] = 1
         self.status = 0
         self.acc = [[0] * self.arr for _ in range(self.arr)]
+        # What each operand buffer holds: (address, stride, rows, K) or None.
+        self.buffer_tags: dict[str, tuple[int, int, int, int] | None] = {"A": None, "B": None}
+        self.loaded = {"A": True, "B": True}   # operands the last operation loaded
 
     @property
     def info(self) -> int:
@@ -163,7 +172,16 @@ class NpuModel:
         r = self.regs
         if not self.params_ok():
             self.status = STATUS_ERR | STATUS_DONE
+            self.buffer_tags = {"A": None, "B": None}
             return
+
+        tags = {"A": (r[A_ADDR], r[A_STRIDE], r[M], r[K]),
+                "B": (r[B_ADDR], r[B_STRIDE], r[N], r[K])}
+        for name, flag in (("A", CTRL_A_KEEP), ("B", CTRL_B_KEEP)):
+            kept = bool(ctrl & flag) and self.buffer_tags[name] == tags[name]
+            self.loaded[name] = not kept
+            if not kept:
+                self.buffer_tags[name] = tags[name]
 
         if not ctrl & CTRL_ACC_KEEP:
             self.acc = [[0] * self.arr for _ in range(self.arr)]
@@ -212,11 +230,17 @@ def row_blocks(base: int, length: int, dma_bytes: int) -> list[int]:
     return [(first + i) & MASK32 for i in range(0, last - first + 1, dma_bytes)]
 
 
-def expected_reads(regs: dict[int, int], ctrl: int, dma_bytes: int) -> list[int]:
-    """Block addresses the DMA reads for an operation, in issue order."""
+def expected_reads(regs: dict[int, int], ctrl: int, dma_bytes: int,
+                   loaded: dict[str, bool]) -> list[int]:
+    """Block addresses the DMA reads for an operation, in issue order.
+
+    `loaded` says which of A and B are fetched (NpuModel.loaded).
+    """
     addrs = []
-    for base, stride, rows in ((regs[A_ADDR], regs[A_STRIDE], regs[M]),
-                               (regs[B_ADDR], regs[B_STRIDE], regs[N])):
+    for name, base, stride, rows in (("A", regs[A_ADDR], regs[A_STRIDE], regs[M]),
+                                     ("B", regs[B_ADDR], regs[B_STRIDE], regs[N])):
+        if not loaded[name]:
+            continue
         for row in range(rows):
             addrs += row_blocks(base + row * stride, regs[K], dma_bytes)
     if regs[BIAS_ADDR] and not ctrl & CTRL_NO_WB:
@@ -224,10 +248,11 @@ def expected_reads(regs: dict[int, int], ctrl: int, dma_bytes: int) -> list[int]
     return addrs
 
 
-def expected_cycles(regs: dict[int, int], ctrl: int, dma_bytes: int) -> int:
+def expected_cycles(regs: dict[int, int], ctrl: int, dma_bytes: int,
+                    loaded: dict[str, bool]) -> int:
     """CYCLES of a valid operation: the four phases of docs/npu.md."""
     m, n, k = regs[M], regs[N], regs[K]
-    load = len(expected_reads(regs, ctrl, dma_bytes)) + 1
+    load = len(expected_reads(regs, ctrl, dma_bytes, loaded)) + 1
     compute = k + m + n + 2
     write_back = 0 if ctrl & CTRL_NO_WB else m * n + 6
     return load + compute + write_back

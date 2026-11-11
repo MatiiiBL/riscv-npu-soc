@@ -6,7 +6,8 @@
 //
 // An operation runs four phases back to back:
 //   LOAD     npu_dma copies M rows of A, N rows of B and the N bias words
-//            (when used) into the buffers: one DMA_BYTES block per cycle
+//            (when used) into the buffers: one DMA_BYTES block per cycle.
+//            A or B is skipped when A_KEEP / B_KEEP finds it already loaded
 //   COMPUTE  npu_opbuf feeds the array with skewed rows; K + M + N + 2
 //            cycles, including the fill and drain of the wavefront
 //   WB       npu_wb post-processes and writes C, one element per cycle
@@ -184,9 +185,56 @@ module npu_top #(
   logic bias_en;
   assign bias_en = (bias_addr_q != 32'd0);
 
-  // ------------------------------------------------------------ sequencer
   typedef enum logic [1:0] {S_IDLE, S_LOAD, S_COMPUTE, S_WB} state_t;
-  state_t        state_q;
+  state_t state_q;
+
+  // ------------------------------------------------------- operand reuse
+  // CTRL.A_KEEP / B_KEEP skip loading an operand whose buffer already holds
+  // exactly the rows this operation would load: each buffer remembers the
+  // address, stride, row count and K it was last loaded with. A rejected
+  // START forgets both, and so does reset. The flags only save time; they
+  // rely on software not changing the operand memory in between.
+  logic          a_tag_v_q, b_tag_v_q;
+  logic [31:0]   a_tag_addr_q, a_tag_stride_q, b_tag_addr_q, b_tag_stride_q;
+  logic [CW-1:0] a_tag_rows_q, b_tag_rows_q;
+  logic [KW-1:0] a_tag_k_q, b_tag_k_q;
+  logic          a_hit, b_hit, load_a, load_b;
+
+  assign a_hit  = a_tag_v_q && (a_tag_addr_q == a_addr_q) && (a_tag_stride_q == a_stride_q) &&
+                  (a_tag_rows_q == m_rows) && (a_tag_k_q == k_len);
+  assign b_hit  = b_tag_v_q && (b_tag_addr_q == b_addr_q) && (b_tag_stride_q == b_stride_q) &&
+                  (b_tag_rows_q == n_rows) && (b_tag_k_q == k_len);
+  assign load_a = !(cfg_wdata[4] && a_hit);
+  assign load_b = !(cfg_wdata[3] && b_hit);
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      a_tag_v_q <= 1'b0;
+      b_tag_v_q <= 1'b0;
+    end else if (state_q == S_IDLE && start) begin
+      if (!params_ok) begin
+        a_tag_v_q <= 1'b0;
+        b_tag_v_q <= 1'b0;
+      end else begin
+        if (load_a) begin
+          a_tag_v_q      <= 1'b1;
+          a_tag_addr_q   <= a_addr_q;
+          a_tag_stride_q <= a_stride_q;
+          a_tag_rows_q   <= m_rows;
+          a_tag_k_q      <= k_len;
+        end
+        if (load_b) begin
+          b_tag_v_q      <= 1'b1;
+          b_tag_addr_q   <= b_addr_q;
+          b_tag_stride_q <= b_stride_q;
+          b_tag_rows_q   <= n_rows;
+          b_tag_k_q      <= k_len;
+        end
+      end
+    end
+  end
+
+  // ------------------------------------------------------------ sequencer
   logic [TW-1:0] step_q, step_last;
   logic          dma_done, wb_done;
   logic          dma_start, wb_start, compute_end, acc_clr;
@@ -274,8 +322,8 @@ module npu_top #(
     .m_rows,
     .n_rows,
     .k_len,
-    .load_a    (1'b1),
-    .load_b    (1'b1),
+    .load_a,
+    .load_b,
     .load_bias (bias_en && !cfg_wdata[2]),   // the bias is only needed for write-back
     .rd_req,
     .rd_addr,

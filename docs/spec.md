@@ -188,7 +188,7 @@ RW registers read back the full 32-bit value written, and the range checks on
 
 | Offset | Name        | Access | Meaning |
 |--------|-------------|--------|---------|
-| `0x00` | `CTRL`      | W      | bit 0 `START`, bit 1 `ACC_KEEP`, bit 2 `NO_WB` |
+| `0x00` | `CTRL`      | W      | bit 0 `START`, bit 1 `ACC_KEEP`, bit 2 `NO_WB`, bit 3 `B_KEEP`, bit 4 `A_KEEP` |
 | `0x04` | `STATUS`    | R      | bit 0 `BUSY`, bit 1 `DONE` (sticky until next START), bit 2 `ERR` |
 | `0x08` | `A_ADDR`    | RW     | address of `A[0][0]` (INT8, row-major, `M x K`) |
 | `0x0C` | `B_ADDR`    | RW     | address of `B[0][0]` (INT8, row-major, `N x K`, i.e. B transposed) |
@@ -209,6 +209,18 @@ B is stored with K contiguous (an `N x K` matrix): this is the natural layout
 of a fully connected layer's weights `W[out][in]`, so `C = A * W^T` needs no
 transpose. Because the array computes one `ARR x ARR` output tile per command,
 software tiles larger matrices; `ACC_KEEP`/`NO_WB` let it split K beyond KMAX.
+
+**Operand reuse.** With `B_KEEP` set, the NPU does not reload B if its local
+buffer already holds exactly the rows this operation would load: the last
+successful operation that loaded B used the same `B_ADDR`, `B_STRIDE`, `N`
+and `K`, and no `START` has been rejected with `ERR` since (nor has the NPU
+been reset). Otherwise B is loaded as usual. `A_KEEP` does the same for A
+with `A_ADDR`, `A_STRIDE`, `M` and `K`. The flags only change timing: the
+result is that of the same operation without them, provided the memory of a
+kept operand has not changed since it was loaded. Software must not modify
+it in between, and must not let an operation's C overlap it. Typical use is a
+tiled GEMM that keeps the weight tile (B) while it walks the rows of A. The
+ISS ignores both bits.
 
 ### 5.1 Semantics (golden reference)
 

@@ -44,6 +44,8 @@
 #define NPU_CTRL_START      (1u << 0)
 #define NPU_CTRL_ACC_KEEP   (1u << 1) /* do not clear accumulators first */
 #define NPU_CTRL_NO_WB      (1u << 2) /* do not write C back             */
+#define NPU_CTRL_B_KEEP     (1u << 3) /* reuse B if loaded with the same B_ADDR/B_STRIDE/N/K */
+#define NPU_CTRL_A_KEEP     (1u << 4) /* reuse A if loaded with the same A_ADDR/A_STRIDE/M/K */
 
 /* NPU_STATUS bits */
 #define NPU_STATUS_BUSY     (1u << 0)
