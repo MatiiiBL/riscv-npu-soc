@@ -2,6 +2,7 @@
 #ifndef PULSE_SOC_H
 #define PULSE_SOC_H
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stddef.h>
 #include "soc_map.h"
@@ -47,9 +48,12 @@ static inline uint64_t rdcycle64(void) {
 int putchar(int c);
 int puts(const char *s);
 int printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) __attribute__((format(printf, 3, 0)));
 void *memset(void *dst, int c, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
 size_t strlen(const char *s);
+int strcmp(const char *a, const char *b);
 
 #endif /* PULSE_SOC_H */
