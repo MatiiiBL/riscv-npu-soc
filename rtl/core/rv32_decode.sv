@@ -138,8 +138,9 @@ module rv32_decode (
             legal  = (funct7 == 7'b0000000);
           end
           default: begin  // 3'b101
-            alu_op = funct7[5] ? rv32_pkg::ALU_SRA : rv32_pkg::ALU_SRL;
-            legal  = (funct7 == 7'b0000000) || (funct7 == 7'b0100000);
+            if (funct7[5]) alu_op = rv32_pkg::ALU_SRA;
+            else           alu_op = rv32_pkg::ALU_SRL;
+            legal = (funct7 == 7'b0000000) || (funct7 == 7'b0100000);
           end
         endcase
       end
@@ -150,9 +151,10 @@ module rv32_decode (
         uses_rs2  = 1'b1;
         opb_imm   = 1'b0;
         if (funct7 == 7'b0000001) begin
-          legal   = 1'b1;
-          is_div  = funct3[2];
-          res_sel = funct3[2] ? rv32_pkg::RES_DIV : rv32_pkg::RES_MUL;
+          legal  = 1'b1;
+          is_div = funct3[2];
+          if (funct3[2]) res_sel = rv32_pkg::RES_DIV;
+          else           res_sel = rv32_pkg::RES_MUL;
         end else if (funct7 == 7'b0000000) begin
           legal = 1'b1;
           case (funct3)
@@ -166,8 +168,9 @@ module rv32_decode (
             default: alu_op = rv32_pkg::ALU_AND;
           endcase
         end else if (funct7 == 7'b0100000) begin
-          legal  = (funct3 == 3'b000) || (funct3 == 3'b101);
-          alu_op = (funct3 == 3'b000) ? rv32_pkg::ALU_SUB : rv32_pkg::ALU_SRA;
+          legal = (funct3 == 3'b000) || (funct3 == 3'b101);
+          if (funct3 == 3'b000) alu_op = rv32_pkg::ALU_SUB;
+          else                  alu_op = rv32_pkg::ALU_SRA;
         end
       end
 
