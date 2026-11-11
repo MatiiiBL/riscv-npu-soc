@@ -13,7 +13,7 @@
 // the core starts from reset at PC 0. Port names are those of the board's official constraint file
 // (ulx3s_v20.lpf), except btn_fire1, which is btn[1] there.
 module ulx3s_top #(
-  parameter int CLK_MHZ       = 25,   // core clock: 25, or a PLL setting below
+  parameter int CLK_MHZ       = 40,   // core clock: 25, or a PLL setting below
   parameter int NPU_DMA_BYTES = 16,   // NPU DMA port width: 4, 8 or 16 bytes
   parameter     IMEM_INIT     = "",
   parameter     DMEM_INIT     = ""
@@ -101,7 +101,7 @@ module ulx3s_top #(
   // the SoC in reset until the PLL is stable and swallows button bounce. The
   // initial values are the flip-flops' state when configuration ends, which
   // makes the same counter the power-on reset.
-  localparam int RST_BITS = 17;   // 65536 cycles: 2.6 ms at 25 MHz
+  localparam int RST_BITS = 17;   // 65536 cycles: 1.6 ms at 40 MHz
 
   logic [1:0]          btn_sync  = '0;
   logic [1:0]          lock_sync = '0;

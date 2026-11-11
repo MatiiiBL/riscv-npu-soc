@@ -30,7 +30,7 @@ OPENFPGALOADER ?= $(TOOL_PREFIX)openFPGALoader
 include ../mk/toolchain.mk
 
 FW            ?= hello
-CLK_MHZ       ?= 25
+CLK_MHZ       ?= 40
 NPU_DMA_BYTES ?= 16
 SEED          ?= 1
 SEEDS         ?= 1 2 3 4 5 6 7 8

@@ -11,7 +11,7 @@ says *what* the hardware must do; this file explains *how* and *why*.
 | `rtl/core/rv32_decode.sv` | combinational decoder, illegal-instruction detection |
 | `rtl/core/rv32_regfile.sv` | 32 x 32 register file, write-before-read |
 | `rtl/core/rv32_alu.sv` | integer ALU |
-| `rtl/core/rv32_muldiv.sv` | single-cycle multiplier, iterative divider |
+| `rtl/core/rv32_muldiv.sv` | multiplier (operands in EX, product in MEM), iterative divider |
 | `rtl/core/rv32_bpred.sv` | BTB with 2-bit counters (or nothing, for `BP_MODE = 0`) |
 | `rtl/core/rv32_core.sv` | the five pipeline stages, hazards, CSRs, counters, retire port |
 | `rtl/soc/soc_top.sv` | core + IMEM + DMEM + decoder + MMIO + NPU |
@@ -26,10 +26,10 @@ says *what* the hardware must do; this file explains *how* and *why*.
 ```
             IF                  ID                     EX                       MEM               WB
      +--------------+   +-----------------+   +-----------------------+   +--------------+   +--------------+
-     | pc_f         |   | decode          |   | forwarding muxes      |   | dmem request |   | load align / |
+     | pc_f         |   | decode, skid    |   | forwarding muxes      |   | dmem request |   | load align / |
      | BTB lookup   |   | regfile read    |   | ALU, branch compare   |   | byte enables |   |  sign extend |
      | next-PC mux  |   | imm, pc + imm   |   | redirect, BTB update  |   | store lanes  |   | regfile write|
-     |              |   | load-use check  |   | MUL, DIV FSM, CSRs    |   |              |   | rvfi_*       |
+     |              |   | interlocks      |   | DIV FSM, CSRs, MUL in |   | MUL product  |   | rvfi_*       |
      +------+-------+   +--------+--------+   +-----------+-----------+   +------+-------+   +------+-------+
             |  imem_addr         ^ imem_rdata             |                      |                  |
             v                    |                        |                      |                  |
@@ -37,7 +37,7 @@ says *what* the hardware must do; this file explains *how* and *why*.
             ^                                             |                      |                  |
             +-------------- redirect_pc_x ----------------+                      |                  |
                                          EX/MEM result ---> EX operands <--------+                  |
-                                         MEM/WB result ---> EX operands <---------------------------+
+                            MEM/WB register (res_w) ---> EX operands <------------------------------+
                                          WB write  -------> regfile (seen by ID in the same cycle)
 ```
 
@@ -47,20 +47,27 @@ register has a `valid` bit, and a bubble is simply `valid = 0`.
 **IF.** `pc_f` is presented to IMEM and, in the same cycle, to the branch
 predictor. Because IMEM has one cycle of latency, its output register *is*
 the IF/ID instruction register: ID decodes `imem_rdata` directly, and only
-the PC and the prediction are stored in flops. Holding ID therefore means
-deasserting `imem_req`, which makes the block RAM keep its output (spec 4.1).
+the PC and the prediction are stored in flops. IMEM reads every cycle
+(`imem_req` drops only after a halt). When ID stalls, `pc_f` holds and the
+instruction ID keeps is captured in a skid register (`skid_q`), because the
+RAM output already shows the next fetch; ID decodes `skid_q` until the
+stall ends, and the RAM output is the right instruction again afterwards.
+Gating the RAM's clock enable with the stall instead (spec 4.1 allows it)
+would put the whole decode and interlock in front of the RAM (section 10).
 
-**ID.** Decode, register-file read, and two things that do not depend on
-registers and so are taken out of EX: the branch/JAL target `pc + imm` and
-the comparison of that target with the predicted one. The load-use check is
-also done here, against the instruction in EX.
+**ID.** Decode, register-file read, the interlocks (section 1.1), and the
+branch/JAL target `pc + imm`, which does not depend on registers and so is
+taken out of EX.
 
 **EX.** Forwarding muxes, ALU, branch comparator, misprediction check and
-redirect, BTB update, multiplier, divider, and CSR reads. The result written
-to `rd` (ALU, link `pc + 4`, CSR, MUL or DIV) is selected here.
+redirect, BTB update, divider, CSR reads, and the multiplier's operand
+registers. The result written to `rd` (ALU, link `pc + 4`, CSR or DIV) is
+selected here.
 
 **MEM.** The load/store request goes out on the data port with byte enables
 and store data already shifted into its lanes (`dmem_be`, `dmem_wdata`).
+The multiply runs here from the registered operands, and its product goes
+into the MEM/WB result register (`res_w`).
 
 **WB.** Load data comes back from the SoC (steered by the decoder), is
 aligned and extended, and is written to the register file; the instruction
@@ -68,40 +75,66 @@ is reported on the retirement port.
 
 ### 1.1 Data hazards and forwarding
 
-| Producer distance | Path | Cost |
-|-------------------|------|------|
-| 1 (producer in MEM) | EX/MEM `res_m` -> EX operand mux | 0 |
-| 2 (producer in WB) | MEM/WB `wb_data_w` -> EX operand mux | 0 |
-| 3 (producer writing back while consumer is in ID) | register file write-before-read | 0 |
-| load, distance 1 | stall ID one cycle, then MEM/WB forward | 1 bubble |
+| Producer | Consumer distance | Path | Cost |
+|----------|-------------------|------|------|
+| ALU, link, CSR, DIV | 1 (producer in MEM) | EX/MEM `res_m` -> EX operand mux | 0 |
+| ALU, link, CSR, DIV, MUL | 2 (producer in WB) | MEM/WB `res_w` -> EX operand mux | 0 |
+| any | 3 (producer writing back while consumer is in ID) | register file write-before-read | 0 |
+| MUL | 1 | stall ID one cycle, then MEM/WB forward | 1 bubble |
+| load | 1 | stall ID two cycles, then register file write-before-read | 2 bubbles |
+| load | 2 | stall ID one cycle, then register file write-before-read | 1 bubble |
 
 The forwarding rule for each EX operand is: take the MEM-stage result if the
 instruction in MEM is valid, writes a register (`rd != x0`) and `rd`
-matches; otherwise the WB-stage result under the same conditions; otherwise
-the value read in ID. MEM has priority because it is the younger producer.
-`rd_we` is computed in the decoder as "writes a register *and* `rd != 0`",
-so writes to x0 never enter the bypass network at all, and the register file
-forces reads of x0 to zero.
+matches; otherwise the MEM/WB result register `res_w` under the same
+conditions; otherwise the value read in ID. MEM has priority because it is
+the younger producer. `rd_we` is computed in the decoder as "writes a
+register *and* `rd != 0`", so writes to x0 never enter the bypass network at
+all, and the register file forces reads of x0 to zero. Both forwards come
+from pipeline registers.
 
-Load data only exists in WB, so a load followed directly by an instruction
-that reads its result cannot be served by the MEM forward. The decoder
-reports which source registers an instruction really reads (`uses_rs1`,
-`uses_rs2`; for example LUI, JAL and the CSR instructions read none), and ID
-stalls for one cycle only when such an operand matches the `rd` of a load in
-EX:
+Load data is not forwarded at all. It exists only in WB and arrives late
+there: 5.8 ns of block RAM clock-to-out on the FPGA, about 6 ns of routing
+out of the 128 RAMs of DMEM, then the bank select, the read steering and
+the alignment. An earlier version forwarded it from WB into EX, which put
+all of that in front of the ALU, the multiplier, the branch comparator and
+the redirect and held the clock at 27 MHz (section 10). Instead, ID waits
+until the load is in WB, when the register file's write-before-read hands
+the value to ID directly:
 
 ```
-cycle            1    2    3    4    5    6
+cycle            1    2    3    4    5    6    7
 lw   a1, 0(s0)   IF   ID   EX   MEM  WB
-add  a2, a1, a3       IF   ID   ID   EX   MEM     a1 forwarded from MEM/WB in cycle 5
-next                  IF   IF   ID   EX            (bubble in EX in cycle 4)
+add  a2, a1, a3       IF   ID   ID   ID   EX   MEM     a1 from the register file in cycle 5
+next                       IF   IF   IF   ID   EX      (bubbles in EX in cycles 4 and 5)
 ```
 
-This covers every consumer the same way: ALU operands, branch operands,
-store data, store and load addresses, `jalr` bases and divider operands.
-Because the stall guarantees that a load's consumer is never in EX while the
-load is in MEM, the MEM-stage forward never has to select load data, which
-keeps the data-memory read path out of the EX operand muxes.
+A multiply produces its result at the end of MEM (section 3), so a consumer
+right behind it stalls once and then takes the product from MEM/WB. The
+interlocks cover every consumer the same way: ALU operands, branch
+operands, store data, store and load addresses, `jalr` bases, multiplier
+and divider operands. They guarantee that the MEM-stage forward never sees
+a load's data or a product and the WB forward never a load's data, so
+`wb_data_w` (which carries the load data) only goes to the register file.
+
+The decoder reports which source registers an opcode reads (`uses_rs1`,
+`uses_rs2`; for example LUI, JAL and the CSR instructions read none),
+derived from the opcode alone so that the check does not wait for the full
+legality decode; an illegal encoding may then stall a cycle before it
+halts. The registers that loads and multiplies have not produced yet are
+kept as one-hot masks, built when those instructions leave ID (`ld_x_q`,
+`mul_x_q`, and `ld_m_q` one stage later) and qualified with `valid_x` /
+`valid_m`, so the check is a lookup of `rs1` and `rs2` in masks that come
+entirely from flip-flops. Both choices shorten the path from the IMEM
+output to the stall, which is the core's critical path (section 10).
+
+A variant that keeps one bubble for ALU consumers of a load (forwarding the
+block RAM data from WB to the ALU operands and the store data only, and
+giving JALR its own adder) was built and measured. It saves about a third
+of the extra load-use cycles on CoreMark (CPI 1.291 instead of 1.345), but
+its block RAM -> ALU -> `res_m` path limits Fmax to 37.4-38.9 MHz, so it
+is slower in wall-clock time than this rule at 40 MHz. Most of CoreMark's
+load consumers are branches, which would wait two bubbles in either case.
 
 ### 1.2 Control hazards
 
@@ -127,9 +160,11 @@ wrong path 2               IF   --
 target                          IF   ID   EX       2 bubbles in EX (cycles 4, 5)
 ```
 
-Branch and jump targets that do not depend on registers are computed in ID,
-and the predicted-target comparison for them is registered there too, so
-only JALR has an adder in the EX redirect path.
+Branch and jump targets that do not depend on registers are computed in ID.
+Their comparison with the predicted target is done in EX from registers, in
+parallel with the longer branch comparison (in ID it would sit behind the
+instruction decode on the path from IMEM), so only JALR has an adder in the
+EX redirect path.
 
 ### 1.3 Halting
 
@@ -200,29 +235,33 @@ branch is predicted taken on its second execution (counter allocated at 2),
 that one not-taken outcome does not flip a saturated counter, and that two
 aliasing branches executed alternately never become predicted.
 
-On FPGA the tag and target arrays map to two block RAMs (Yosys moves the
-`pc_f` register into the RAM's address register) and the counters to LUT
-RAM.
+On FPGA all three arrays are LUT RAM, read asynchronously from `pc_f`
+(`ram_style = "distributed"` on the tag and target arrays): 56 `DPR16X4`
+for tags and targets, 4 for the counters. As block RAMs they would need a
+registered read address, which Yosys provides by moving `pc_f` into the
+RAMs; the whole next-PC selection, including the late stall and redirect,
+then ended at the RAM address pins several nanoseconds of routing away
+(section 10).
 
 ## 3. Multiply and divide
 
-**MUL, MULH, MULHSU, MULHU** are a single combinational multiply in EX. The
-operands are sign- or zero-extended to 64 bits according to the variant and
+**MUL, MULH, MULHSU, MULHU** span EX and MEM. In EX the forwarded operands
+are sign- or zero-extended to 33 bits according to the variant and
+registered (with a high/low select bit); in MEM the registered operands are
 multiplied with a 64-bit result: the exact 33 x 33 product always fits, so
 one multiplier serves all four instructions (MUL takes bits 31:0, the others
-63:32). Verilator evaluates it with native 64-bit arithmetic, and Yosys
-narrows the redundant sign bits back to a 33 x 33 multiply on four ECP5
-`MULT18X18D` blocks plus a carry-chain adder.
+63:32). The product goes into the MEM/WB result register `res_w`. Verilator
+evaluates it with native 64-bit arithmetic, and Yosys narrows the redundant
+sign bits back to a 33 x 33 multiply on four ECP5 `MULT18X18D` blocks plus
+a carry-chain adder.
 
-*Why single-cycle rather than pipelined:* a pipelined multiplier would
-produce its result at the end of MEM, which would need a second interlock
-("mul-use", like load-use) and cost a bubble on every dependent multiply,
-which is common in address arithmetic and in the CPU fallback paths of the
-GEMM kernels. The board clock of the target (ULX3S) is 25 MHz, a 40 ns
-budget in which a DSP-based multiply plus its adder is expected to fit. The
-multiplier is the first candidate to split across EX/MEM if a faster clock
-is targeted later; it would be a local change (an extra `is_mul` check next
-to the load-use one). Timing has not been closed with nextpnr yet.
+*Why not in EX:* the multiply and its adder take about 20 ns on the ECP5
+(routing to the DSPs, 3.9 ns through them, two carry chains). In EX they
+sat behind the forwarding muxes and limited the clock to 27 MHz (section
+10). In MEM they start from registers, at the cost of a "mul-use"
+interlock: an instruction that reads the product right away waits one
+cycle, then takes it from MEM/WB. On CoreMark that costs about 30,000
+cycles (1%).
 
 **DIV, DIVU, REM, REMU** use a radix-2 restoring divider on the operand
 magnitudes, one quotient bit per cycle. The instruction stays in EX
@@ -265,7 +304,7 @@ Performance counters are outputs of `rv32_core` (and of `soc_top`):
 |------|--------|
 | `perf_cycles` | cycles since reset (64-bit) |
 | `perf_instret` | retired instructions (64-bit) |
-| `perf_load_use` | load-use bubbles |
+| `perf_load_use` | load-use bubbles (mul-use bubbles are not counted) |
 | `perf_mispredict` | EX redirects |
 | `perf_div_stall` | cycles EX was held by the divider |
 | `perf_ctrl` | branches and jumps resolved |
@@ -483,14 +522,17 @@ CPI (`soc_sim --stats`); cycles include the 4-cycle pipeline fill:
 
 | Program | `BP_MODE = 1` cycles / CPI | `BP_MODE = 0` cycles / CPI | Notes |
 |---------|---------------------------|----------------------------|-------|
-| `sw/bench/coremark` | 3075804 / 1.167 | 3657306 / 1.388 | 3.29 vs 2.77 CoreMark/MHz; 9.7% vs 58.8% of branches mispredicted |
-| `sw/bench/gemm` | 13093309 / 1.012 | 14339620 / 1.111 | whole run, software and NPU GEMMs |
-| `sw/tests/hello` | 1430 / 1.470 | 1708 / 1.755 | 973 instructions, 189 load-use bubbles, 198 divider stall cycles; 34 vs 173 mispredicts |
-| `verif/core/calls` | 27480 / 1.198 | 32960 / 1.437 | recursive fib(15), returns to varying call sites |
-| `verif/core/bpred` | 4091 / 1.179 | 5051 / 1.455 | loop and pattern branches |
+| `sw/bench/coremark` | 3544897 / 1.345 | 4126399 / 1.566 | 2.855 vs 2.453 CoreMark/MHz; 9.7% vs 58.8% of branches mispredicted |
+| `sw/bench/gemm` | 13187098 / 1.021 | 14432925 / 1.118 | whole run, software and NPU GEMMs |
+| `sw/tests/hello` | 1630 / 1.675 | 1908 / 1.961 | 973 instructions, 389 load-use bubbles, 198 divider stall cycles; 34 vs 173 mispredicts |
+| `verif/core/calls` | 27491 / 1.199 | 32971 / 1.437 | recursive fib(15), returns to varying call sites |
+| `verif/core/bpred` | 4093 / 1.179 | 5053 / 1.456 | loop and pattern branches |
 | `rv32ui-p-add` | 526 / 1.143 | 496 / 1.078 | see below |
-| `rv32ui-p-lw` | 310 / 1.115 | 298 / 1.072 | |
+| `rv32ui-p-lw` | 314 / 1.129 | 302 / 1.086 | |
 | `rv32um-p-div` | 394 / 4.330 | 394 / 4.330 | 9 divides, 297 divider stall cycles |
+
+These are the cycle counts of the 40 MHz pipeline (section 10); its load
+and multiply interlocks cost CPI that the clock more than pays back.
 
 The riscv-tests run slightly *faster* without prediction: their bypass test
 cases execute each check in a two-iteration loop, so the loop branch is
@@ -503,19 +545,19 @@ Yosys `synth_ecp5` of `soc_top`, NPU included, with the `hello` image
 
 | Resource | `NPU_DMA_BYTES = 4` | `= 16` | Notes |
 |----------|-------------------:|-------:|-------|
-| LUT4 | 10252 | 10663 | with 2 per CCU2C, 14105 LUTs (16.9% of an ECP5-85F) at 16 |
-| CCU2C | 1699 | 1721 | carry chains |
-| TRELLIS_FF | 7188 | 7190 | |
-| DP16KD | 167 | 175 | DMEM 128 in both, IMEM 29, BTB 2, NPU operand buffers 8 / 16 |
-| TRELLIS_DPR16X4 | 36 | 36 | register file (16 per read port), BTB counters (4) |
+| LUT4 | 10228 | 10666 | with 2 per CCU2C, 14118 LUTs (16.9% of an ECP5-85F) at 16 |
+| CCU2C | 1697 | 1726 | carry chains |
+| TRELLIS_FF | 7323 | 7325 | |
+| DP16KD | 165 | 173 | DMEM 128 in both, IMEM 29, NPU operand buffers 8 / 16 |
+| TRELLIS_DPR16X4 | 92 | 92 | register file (16 per read port), BTB tags, targets and counters (60) |
 | MULT18X18D | 70 | 70 | 4 in the core's multiplier, 66 in the NPU |
 
 Banking leaves DMEM at 128 block RAMs; the extra block RAMs and most of the
 extra LUTs at 16 bytes are the NPU's wider operand buffers and datapath
 (`docs/npu.md`). IMEM is built from 32 one-bit-wide RAM columns; Yosys drops
 the columns whose bit is constant across the whole image (3 for `hello`),
-so a full program uses 32. The core alone (`rv32_core`) is 3246 LUT4 and
-1115 flip-flops.
+so a full program uses 32. The core alone (`rv32_core`) is 3538 LUT4, 396
+CCU2C, 1250 flip-flops and 92 `DPR16X4`, with no block RAM.
 
 What the 16-byte port buys (`soc_sim` vs `soc_sim_dma4`, `sw/bench`):
 
@@ -526,3 +568,62 @@ What the 16-byte port buys (`soc_sim` vs `soc_sim_dma4`, `sw/bench`):
 | GEMM 16 x 16 x 2048, NPU cycles | 42135 (42.2x) | 17687 (100.5x) |
 | GEMM 8 x 8 x 64, NPU cycles | 665 (23.9x) | 489 (32.5x) |
 | CoreMark | 3.29 / MHz | 3.29 / MHz (identical cycles) |
+
+These were measured with the 25 MHz pipeline that preceded section 10 and
+an earlier NPU driver; with the current pipeline and driver the four
+16-byte NPU figures are 3053, 38929, 17766 and 527 cycles.
+
+## 10. Clock frequency and CPI
+
+On the ULX3S's LFE5U-85F ([fpga.md](fpga.md)) the original pipeline closed
+timing at 25 MHz and no further: 26.3-27.8 MHz over eight nextpnr seeds.
+Every critical path started at a block RAM output: the load data from DMEM,
+forwarded from WB into EX, and the instruction word from IMEM, through the
+decode and the interlock to the stall. The changes below took those paths
+off the RAM outputs one at a time. Each step was placed and routed with
+seeds 1-4 against a 50 MHz target (`make -C fpga seeds CLK_MHZ=50`) and
+checked to leave every cycle count unchanged except where its hazard rule
+changed:
+
+| Step | Change | Fmax, seeds 1-4 (MHz) | Critical path afterwards |
+|------|--------|----------------------:|--------------------------|
+| 0 | the 25 MHz pipeline | 26.3-27.8 (8 seeds) | DMEM load in WB -> forward -> 33 x 33 multiply -> `res_m`, 37 ns |
+| 1 | multiply in MEM, mul-use interlock (section 3) | 27.3-28.3 | DMEM load -> forward -> JALR adder -> target compare -> redirect -> next PC -> BTB RAM address |
+| 2 | load data not forwarded (section 1.1) | 33.6-38.4 | IMEM -> decode -> interlock -> stall -> next PC -> BTB RAM address |
+| 3 | IMEM reads every cycle, skid register (section 1) | 36.0-40.0 | the same, without the IMEM clock enable |
+| 3b | interlock operand flags from the opcode alone | 36.9-39.5 | the same, shorter decode |
+| 4 | BTB in LUT RAM, predicted-target compare in EX | 40.1-44.0 | IMEM -> decode -> interlock -> stall -> `pc_f` and its copies |
+| 5 | interlock as a lookup in one-hot masks | 43.7-46.3 | the same, 21.5-23 ns |
+
+At its 40 MHz constraint the final pipeline reaches 42.1-46.5 MHz over
+eight seeds (worst slack 1.2 ns), and the board runs it at 40 MHz from the
+PLL. The cycles it gives up are the extra load-use bubbles (on CoreMark
+323,168 -> 762,299: a second bubble after every adjacent load, plus 115,963
+for consumers one instruction later) and about 30,000 mul-use bubbles
+(1%):
+
+| | Before: 25 MHz | After: 40 MHz | |
+|---|---:|---:|---:|
+| CoreMark CPI, `BP_MODE = 1` / `0` | 1.167 / 1.388 | 1.345 / 1.566 | +15% / +13% |
+| CoreMark/MHz, `BP_MODE = 1` / `0` | 3.291 / 2.768 | 2.855 / 2.453 | -13% / -11% |
+| **CoreMark/s, `BP_MODE = 1`** | **82.3** | **114.2** | **1.39x** |
+| CoreMark/s, `BP_MODE = 0` | 69.2 | 98.1 | 1.42x |
+| MNIST on the NPU, cycles per inference | 3027 | 3053 | +0.9% |
+| **MNIST on the NPU, us per inference** | **121.1** | **76.3** | **1.59x** |
+| MNIST in software, us per inference | 14055 | 8798 | 1.60x |
+| GEMM 64 x 64 x 256 on the NPU, us | 1534 | 973 | 1.58x |
+
+The NPU workloads keep almost all of the clock gain because they spend
+their time in the NPU, not in the interlocks.
+
+What limits the clock now is the cone from the IMEM output to the stall:
+5.6 ns of block RAM clock-to-out, about 3 ns of routing out of IMEM, about
+ten LUT levels of decode and mask lookup, then the next-PC mux of a copy of
+`pc_f` that Yosys builds as the read-address register of the BTB LUT RAM
+(where the stall becomes a mux select rather than a clock enable). Going
+further would take a decoupled fetch stage (an instruction queue, so that a
+stall no longer holds the fetch PC), and next the multiply in MEM, about
+20 ns, would need a second stage and a second mul-use bubble. Each is a
+larger change for at most 10-15% more clock, so the pipeline stops here.
+The compiler is also not told about the longer load latency; a scheduling
+model for it could recover some load-use bubbles in software.

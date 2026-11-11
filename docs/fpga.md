@@ -28,27 +28,26 @@ block RAMs, so the core runs it from reset as soon as configuration ends.
 
 ## 2. Clocking
 
-The default core clock is the **25 MHz oscillator itself** (`CLK_MHZ = 25`):
+The core clock is **40 MHz from the PLL** (`CLK_MHZ = 40`, the default):
 section 6 shows the design closes timing there with at least 5% margin on
-every seed tried, and not at 30 MHz on any. Without a PLL there is no lock
-time and no PLL jitter to budget for.
-
-Any other `CLK_MHZ` instantiates an `EHXPLLL`. The board top keeps a table of
-exact settings for 30, 35, 40, 45 and 50 MHz, copied from
-`ecppll -i 25 -o <MHz>` (`CLKI_DIV`, `CLKFB_DIV`, `CLKOP_DIV`,
-`CLKOP_CPHASE`, feedback from `CLKOP`, VCO between 400 and 800 MHz); a value
-without an entry stops elaboration with an `$error`. These are there for
-when the RTL changes in section 8 land: `make -C fpga CLK_MHZ=40` then builds
-a 40 MHz design, and the build fails if it does not meet timing.
+every seed tried, and 45 MHz on only one of eight. The 25 MHz oscillator
+feeds an `EHXPLLL` with `CLKI_DIV = 5`, `CLKFB_DIV = 8`, `CLKOP_DIV = 15`
+(a 600 MHz VCO). The board top keeps a table of exact settings for 30, 35,
+40, 45 and 50 MHz, copied from `ecppll -i 25 -o <MHz>` (`CLKI_DIV`,
+`CLKFB_DIV`, `CLKOP_DIV`, `CLKOP_CPHASE`, feedback from `CLKOP`, VCO
+between 400 and 800 MHz); a value without an entry stops elaboration with
+an `$error`. `CLK_MHZ = 25` bypasses the PLL and clocks the SoC from the
+oscillator directly, which is what the pipeline before the timing work of
+[core.md](core.md) section 10 could run at.
 
 nextpnr gets the clock constraint from the LPF (`FREQUENCY PORT "clk_25mhz"
-25 MHZ`) and, through a PLL, derives the output's constraint from the
-dividers (`Derived frequency constraint of 30.0 MHz for net clk` in the
-log). `--freq` is passed the same `CLK_MHZ` and only covers clocks nextpnr
+25 MHZ`) and derives the PLL output's constraint from the dividers
+(`Derived frequency constraint of 40.0 MHz for net clk` in the log).
+`--freq` is passed the same `CLK_MHZ` and only covers clocks nextpnr
 cannot derive.
 
 The UART divider follows the clock: `UART_DIV = round(CLK_MHZ * 10^6 /
-115200)`, 217 at 25 MHz (115207 baud, +0.006%).
+115200)`, 347 at 40 MHz (115274 baud, +0.06%).
 
 ## 3. Reset
 
@@ -61,13 +60,13 @@ LOCK      --> 2 FF sync --+    (counts up to 2^16, then holds)
 The F1 button (high while pressed) and the PLL's `LOCK` are asynchronous to
 the core clock, so each goes through a two-flip-flop synchronizer. While
 either asks for reset (button pressed, PLL unlocked) the counter is held at
-zero; `rst_n` is its top bit, so the SoC leaves reset 65536 cycles (2.6 ms
-at 25 MHz) after the last request. That waits for the PLL to settle and
+zero; `rst_n` is its top bit, so the SoC leaves reset 65536 cycles (1.6 ms
+at 40 MHz) after the last request. That waits for the PLL to settle and
 absorbs button bounce: every bounce restarts the count. The counter and the
 synchronizers are declared with initial values, which an ECP5 loads into
 its flip-flops at the end of configuration, so the same counter is the
-**power-on reset**: the SoC starts in reset and comes out of it 2.6 ms after
-the bitstream is loaded. `soc_top`'s reset is synchronous (spec section 9),
+**power-on reset**: the SoC starts in reset and comes out of it 1.6 ms after
+the PLL locks. `soc_top`'s reset is synchronous (spec section 9),
 and one flip-flop drives it.
 
 ## 4. Pin map
@@ -122,7 +121,7 @@ firmware toolchain is the usual one (`mk/toolchain.mk`).
 | `make -C fpga prog` | `openFPGALoader -b ulx3s build/fpga/pulse_<FW>.bit` |
 
 `FW` is any program in `sw/tests/` or `sw/bench/` (default `hello`); its ELF
-is built by `sw/`. Other knobs: `CLK_MHZ` (25, or a PLL entry),
+is built by `sw/`. Other knobs: `CLK_MHZ` (default 40; 25, or a PLL entry),
 `NPU_DMA_BYTES` (4, 8 or 16, default 16), `SEED` (default 1), `SYNTH_FLAGS`,
 `NEXTPNR_FLAGS`. Each program gets its own directory, `build/fpga/<FW>/`,
 with the images (`imem.hex`, and `dmem0.hex` to `dmem<N-1>.hex` for the
@@ -132,8 +131,8 @@ nextpnr's textual configuration and its JSON report; a change of
 `CLK_MHZ`, `NPU_DMA_BYTES`, `SEED` or the flags reruns the steps it
 affects. Place and route uses a fixed seed, so a build is reproducible on
 one machine; across platforms nextpnr's result can differ a little (seed 1
-gives 27.03 MHz on macOS arm64 and 27.04 MHz in CI on Linux x86-64; during
-bring-up an earlier netlist gave 27.65 and 28.43 MHz).
+gives 43.62 MHz on macOS arm64 and 42.68 MHz in CI on Linux x86-64, both
+meeting 40 MHz).
 
 ### Programming the board
 
@@ -169,7 +168,7 @@ meets timing, from a design that boots from block RAM.
 ## 6. Results
 
 Measured with OSS CAD Suite 2026-11-01 on macOS arm64, `FW=hello`,
-`CLK_MHZ=25`, `NPU_DMA_BYTES=16` (DMEM in four word-interleaved banks, the
+`CLK_MHZ=40`, `NPU_DMA_BYTES=16` (DMEM in four word-interleaved banks, the
 NPU's 16-byte DMA port).
 
 ### Synthesis choices
@@ -189,120 +188,107 @@ nextpnr's count after packing, `make -C fpga report`:
 
 | Resource | Used | LFE5U-85F | Share |
 |----------|-----:|----------:|------:|
-| LUT4 (`TRELLIS_COMB`, carry halves included) | 14772 | 83640 | 17.7 % |
-| Flip-flops (`TRELLIS_FF`) | 6913 | 83640 | 8.3 % |
-| DP16KD block RAM | 175 | 208 | 84.1 % |
+| LUT4 (`TRELLIS_COMB`, carry halves included) | 15098 | 83640 | 18.1 % |
+| Flip-flops (`TRELLIS_FF`) | 7025 | 83640 | 8.4 % |
+| DP16KD block RAM | 173 | 208 | 83.2 % |
 | MULT18X18D | 70 | 156 | 44.9 % |
-| Distributed RAM (`TRELLIS_RAMW`) | 36 | 10455 | 0.3 % |
+| Distributed RAM (`TRELLIS_RAMW`) | 92 | 10455 | 0.9 % |
 | I/O | 12 | 365 | 3.3 % |
+| PLL (`EHXPLLL`) | 1 | 4 | 25.0 % |
 
 The block RAMs are 128 for DMEM (four banks of 16K words, each 32 columns
 of 16K x 1), 29 for IMEM (64 KiB; Yosys drops the 3 bit columns that are
-constant in the `hello` image, so a program that uses every bit needs 32),
-16 for the NPU's operand buffers and 2 for the BTB. That leaves 33 of the
-208 free. The multipliers are 64 in the NPU's processing elements, 2 in
+constant in the `hello` image, so a program that uses every bit needs 32)
+and 16 for the NPU's operand buffers. That leaves 35 of the 208 free. The
+distributed RAM is the register file (32 `DPR16X4`, 16 per read port) and
+the BTB (60). The multipliers are 64 in the NPU's processing elements, 2 in
 its requantization stage and 4 in the core's 33 x 33 multiplier. Yosys's
-own count is 10708 LUT4, 1672 CCU2C carry cells and 6913 flip-flops;
+own count is 10704 LUT4, 1671 CCU2C carry cells and 7025 flip-flops;
 nextpnr's `TRELLIS_COMB` also counts both halves of every CCU2C and the
 LUTs it adds while packing. The board top drops the SoC's simulation taps,
 retirement port and 64-bit performance counters, which is why it has fewer
 flip-flops than `make -C rtl synth-check` reports for `soc_top`.
 
-Before DMEM was banked (one 32-bit NPU port) the same flow gave 14231
-LUT4, 167 DP16KD and 27.10-29.18 MHz over the same eight seeds: the 16-byte
-port costs about 540 LUT4 and 8 block RAMs (the NPU's wider operand
-buffers) and moves Fmax by less than the seed spread.
+The 25 MHz pipeline that preceded the timing work of [core.md](core.md)
+section 10 used 14772 LUT4, 6913 flip-flops, 175 DP16KD and 36 `DPR16X4`:
+the 40 MHz one costs about 330 LUT4 and 110 flip-flops (the multiplier's
+operand registers, the skid register, the interlock masks) and moves the
+BTB from 2 block RAMs into LUT RAM.
 
 ### Timing
 
-Fmax per seed, the same netlist placed and routed at the 25 MHz constraint
-(`make -C fpga seeds -j8`):
+Fmax per seed, the same netlist placed and routed against the clock it runs
+at (`make -C fpga seeds -j8`), before and after the timing work:
 
 | Seed | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |------|---:|---:|---:|---:|---:|---:|---:|---:|
-| Fmax (MHz) | 27.03 | 26.41 | 27.38 | 26.32 | 26.39 | 26.52 | 27.79 | 27.48 |
+| 25 MHz pipeline, 25 MHz constraint | 27.03 | 26.41 | 27.38 | 26.32 | 26.39 | 26.52 | 27.79 | 27.48 |
+| 40 MHz pipeline, 40 MHz constraint | 43.62 | 43.41 | 46.51 | 44.86 | 42.83 | 42.98 | 44.13 | 42.06 |
 
-Minimum 26.32, median 26.77, maximum 27.79 MHz: a spread of 5.6%, every
-seed meeting 25 MHz with 2.0 to 4.0 ns of slack. Asking for more does not
-help: with the PLL at 30 MHz (`CLK_MHZ=30`) the timing-driven placer has a
-tighter target but the same logic, and seeds 1-4 reach 28.34, 27.51, 28.44
-and 27.92 MHz. None meets 30 MHz.
+Now: minimum 42.06, median 43.51, maximum 46.51 MHz (before: 26.32 /
+26.77 / 27.79), every seed meeting 40 MHz with 1.2 to 3.5 ns of slack. 45
+MHz, the next PLL setting, would be met by one seed in eight.
 
-**Chosen clock: 25 MHz**, the oscillator, with at least 5.3% margin on all
+**Chosen clock: 40 MHz**, from the PLL, with at least 5.1% margin on all
 eight seeds (nextpnr's delays are already its worst-case model for speed
-grade 6). The build uses seed 1: 27.03 MHz, 3.0 ns of slack.
+grade 6). The build uses seed 1: 43.62 MHz, 2.07 ns of slack.
+
+The cycle cost of the faster pipeline (longer load-use and mul-use
+interlocks) and what it buys in wall-clock time, from [core.md](core.md)
+section 10:
+
+| | 25 MHz pipeline | 40 MHz pipeline |
+|---|---:|---:|
+| CoreMark/MHz (`BP_MODE = 1`) | 3.291 | 2.855 |
+| CoreMark/s | 82.3 | 114.2 (1.39x) |
+| MNIST on the NPU, cycles per inference | 3027 | 3053 |
+| MNIST on the NPU, us per inference | 121.1 | 76.3 (1.59x) |
 
 ## 7. Critical path
 
 nextpnr's critical path for seed 1 (`make -C fpga report`, full listing in
-`build/fpga/hello/nextpnr.log`) is 37.0 ns: 15.6 ns in cells and 21.4 ns in
-routing. It is a load forwarded into a multiply:
+`build/fpga/hello/nextpnr.log`) is 22.9 ns: 8.9 ns in cells and 14.0 ns in
+routing. It runs from the instruction word to the stall that holds the
+fetch PC:
 
 | ns | Cumulative | Where | RTL |
 |---:|---:|-------|-----|
-| 5.8 | 5.8 | clock-to-out of a DMEM block RAM, CPU port (`u_soc.u_dmem.g_bank[1].u_ram.mem.0.8`, output unregistered) | `rtl/soc/bram_tdp.sv:43` |
-| 11.7 | 17.5 | 6.3 ns of routing out of the RAM array, then seven LUT levels and the wires between them, which ABC built from the 4:1 bank select, the read steering, the load byte select and sign extension, the WB result select, the forwarding mux and the multiplier operand's sign extension | `rtl/soc/soc_dmem.sv:86-91`, `rtl/soc/soc_bus.sv:117`, `rtl/core/rv32_core.sv:495-513`, `rtl/core/rv32_core.sv:286-294`, `rtl/core/rv32_muldiv.sv:40-41` |
-| 3.7 | 21.2 | routing to a MULT18X18D | |
-| 3.9 | 25.1 | the MULT18X18D | `rtl/core/rv32_muldiv.sv:42` |
-| 10.3 | 35.4 | the carry chains that add the four 18 x 18 partial products, and the routing between them | `rtl/core/rv32_muldiv.sv:42` |
-| 1.6 | 37.0 | `mul_y` select, result mux, setup at `res_m` | `rtl/core/rv32_core.sv:389-396, 416` |
+| 5.6 | 5.6 | clock-to-out of an IMEM block RAM (the instruction word in ID) | `rtl/soc/bram_sp.sv:29` |
+| 3.0 | 8.7 | routing out of the IMEM array | |
+| 11.4 | 20.1 | ten LUT levels and the wires between them: the skid mux, the opcode decode of `uses_rs1`/`uses_rs2`, the lookup of `rs1`/`rs2` in the pending-register masks, the stall | `rtl/core/rv32_core.sv:192`, `rtl/core/rv32_decode.sv:52-56`, `rtl/core/rv32_core.sv:290-294` |
+| 2.8 | 22.9 | a 4:1 mux (PFUMX and L6MUX) and its routing into a copy of `pc_f` that Yosys builds as the read-address register of the BTB LUT RAM; there the stall is a mux select, not a clock enable | `rtl/core/rv32_core.sv:144-145`, `rtl/core/rv32_bpred.sv:64` |
 
-The start is the read data of a load in WB, which comes straight from the
-block RAM (DMEM has one cycle of read latency, spec section 4). A dependent
-instruction one load-use bubble behind is in EX in that same cycle, and the
-WB-to-EX forward hands it the data, so one cycle holds the RAM's 5.8 ns
-clock-to-out, the routing out of a memory spread over 128 block RAMs, the
-bank select and load alignment, and then a full 33 x 33 multiply with its
-adder tree. Seven of the eight seeds have this path, from one bank or
-another, as their critical path; seed 8's is the next one in section 8,
-the same load feeding the branch redirect. The core already notes the
-multiplier as the first thing to split if a faster clock is wanted
-([core.md](core.md) section 3).
+All eight seeds end on this cone, at that `pc_f` copy, at `pc_f` itself
+(its clock enable) or at the ID/EX registers.
 
-## 8. What would raise Fmax
+Before the timing work, the critical path was 37.0 ns: a load's data
+straight out of a DMEM block RAM (5.8 ns clock-to-out, 6.3 ns of routing
+out of the 128-RAM array, bank select and alignment), forwarded from WB
+into the 33 x 33 multiply in EX, its two carry chains and the result mux
+into `res_m`.
 
-The path above is the first of several that share its start. To see what
-follows, the changes below were made to a scratch copy of the RTL, only to
-measure timing (they are not functionally complete and are not in the
-tree), synthesized with this board top and placed and routed with seeds 1
-and 2 against a 40 or 45 MHz target:
+## 8. From 25 to 40 MHz
 
-| Change (timing experiment) | Fmax, seeds 1 / 2 | Critical path |
-|----------------------------|------------------:|---------------|
-| none (this tree, 25 MHz target) | 27.03 / 26.41 MHz | load in WB -> forward -> multiply -> `res_m` (section 7), 37.0-37.9 ns |
-| multiplier operands registered (multiply from flip-flops, as it would be in MEM) | 27.74 / 27.61 MHz | load in WB -> forward -> ALU add for the JALR target (`rv32_alu.sv`) -> predicted-target compare -> `redirect_x` -> next PC -> BTB RAM address, 36.1-36.2 ns |
-| and load data registered before it is forwarded | 36.95 / 38.17 MHz | IMEM block RAM -> decode -> load-use check -> `stall_d` -> `imem_req` -> IMEM output-register reset, or -> next PC -> BTB RAM address, 26.2-27.1 ns |
+Every critical path of the 25 MHz pipeline started at a block RAM output.
+[core.md](core.md) section 10 takes them off one at a time, each step
+placed and routed with seeds 1-4 against a 50 MHz target:
 
-So the fix, in order:
+| Step | Fmax, seeds 1-4 (MHz) |
+|------|----------------------:|
+| the 25 MHz pipeline (8 seeds, 25 MHz target) | 26.3-27.8 |
+| multiply in MEM, one-cycle mul-use interlock | 27.3-28.3 |
+| load data not forwarded (two bubbles for an adjacent consumer, one a step later) | 33.6-38.4 |
+| IMEM reads every cycle, stalled instruction in a skid register | 36.0-40.0 |
+| interlock operand flags from the opcode alone | 36.9-39.5 |
+| BTB in LUT RAM, predicted-target compare in EX | 40.1-44.0 |
+| interlock as a lookup in one-hot masks of pending registers | 43.7-46.3 |
 
-1. **Take the multiply out of EX.** Register the operands at EX/MEM (the
-   MULT18X18D input registers can hold them) and finish the product and the
-   high/low select in MEM; a dependent instruction then waits one cycle,
-   like after a load (a "mul-use" interlock next to `lu_hazard`,
-   `rv32_core.sv:226`). On its own this gains only 3-4%, because the next
-   path is the same load feeding the branch logic: the redirect
-   (`rv32_core.sv:351-352`) drives the next PC, which Yosys feeds straight
-   into the BTB RAMs' address registers.
-2. **Forward load data from a register.** Add a pipeline register after
-   the load alignment and forward from it, so a load costs two bubbles to
-   a dependent instruction instead of one. Together with step 1 this gives
-   37.0-38.2 MHz, about 1.4x. It changes spec section 6 ("a load followed
-   by a dependent instruction costs exactly one bubble"), so it is a design
-   decision, not just a fix. A cheaper variant keeps one bubble for ALU
-   consumers and gives two only to branches, JALR and multiplies, the
-   consumers whose paths are long.
-3. **Then the fetch stall.** The load-use check (`rv32_core.sv:226-228`)
-   is computed from the instruction word straight out of IMEM and, through
-   `stall_d`, holds the PC and gates the IMEM read (`imem_req`,
-   `rv32_core.sv:110`) in the same cycle; `imem_req` reaches the RAM's
-   clock enable and, with the bad-fetch clear, its output reset. Decoding
-   `uses_rs1`/`uses_rs2` from fewer bits, or holding a stalled instruction
-   in a register instead of stopping the RAM, shortens it.
-
-With steps 1 and 2, `CLK_MHZ=35` would leave a margin like today's (5-9%).
-Whether that pays depends on the extra bubbles: the clock gains 40%, while
-CoreMark's CPI of 1.17 rises by the share of loads followed immediately by
-their consumer, which `soc_sim --stats` counts (`load-use stalls`).
+A variant that keeps one bubble for ALU consumers of a load was also built:
+its block RAM -> ALU -> `res_m` path stops it at 37.4-38.9 MHz, so it was
+not kept. Going further than 40 MHz would take a decoupled fetch stage (an
+instruction queue, so that the stall no longer holds the fetch PC), and
+then the multiply in MEM, about 20 ns, would need a second stage. Both are
+larger changes for at most 10-15% more clock.
 
 The NPU is not on any of these paths. Placed and routed on its own, with
 `DMA_BYTES = 16` and every port behind a flip-flop (inputs from a shift
