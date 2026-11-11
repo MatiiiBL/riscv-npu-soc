@@ -18,9 +18,9 @@
 #include <vector>
 
 #include "Vsoc_top.h"
-#include "Vsoc_top___024root.h"
 #include "elf_loader.h"
 #include "verilated.h"
+#include "verilated_syms.h"
 #include "verilated_vcd_c.h"
 
 namespace {
@@ -101,9 +101,25 @@ Options parse_args(int argc, char **argv) {
     return opt;
 }
 
+// Returns the 32-bit word array `var` of the instance `scope`, made visible by
+// sim/sim.vlt; a model without it is a build error. Looking arrays up by
+// hierarchical name keeps the harness independent of Verilator's internal
+// member names.
+uint32_t *find_words(const VerilatedContext &ctx, const std::string &scope, const char *var,
+                     size_t words) {
+    const VerilatedScope *s = ctx.scopeFind(scope.c_str());
+    VerilatedVar *v = s != nullptr ? s->varFind(var) : nullptr;
+    if (v == nullptr || v->totalSize() != words * sizeof(uint32_t)) {
+        std::fprintf(stderr, "soc_sim: the model has no %zu-word array %s.%s\n", words,
+                     scope.c_str(), var);
+        std::exit(EXIT_USAGE);
+    }
+    return static_cast<uint32_t *>(v->datap());
+}
+
 // Copies the ELF image into the IMEM and DMEM arrays of the model; every
 // word not covered by a segment is zero.
-bool load_program(Vsoc_top &top, const char *path) {
+bool load_program(const VerilatedContext &ctx, const char *path) {
     std::vector<ElfSegment> segments;
     std::string error;
     if (!load_elf32(path, segments, error)) {
@@ -139,18 +155,20 @@ bool load_program(Vsoc_top &top, const char *path) {
                (static_cast<uint32_t>(m[4 * i + 2]) << 16) |
                (static_cast<uint32_t>(m[4 * i + 3]) << 24);
     };
-    Vsoc_top___024root *root = top.rootp;
-    for (size_t i = 0; i < IMEM_SIZE / 4; i++) {
-        root->soc_top__DOT__u_imem__DOT__mem[i] = word(imem, i);
-    }
+    uint32_t *dmem_words = find_words(ctx, "TOP.soc_top.u_dmem", "mem", DMEM_SIZE / 4);
     for (size_t i = 0; i < DMEM_SIZE / 4; i++) {
-        root->soc_top__DOT__u_dmem__DOT__mem[i] = word(dmem, i);
+        dmem_words[i] = word(dmem, i);
     }
+
+    uint32_t *imem_words = find_words(ctx, "TOP.soc_top.u_imem", "mem", IMEM_SIZE / 4);
+    for (size_t i = 0; i < IMEM_SIZE / 4; i++) {
+        imem_words[i] = word(imem, i);
+    }
+
     // The ISS starts with every register at zero; do not leave that to the
     // simulator's choice of initial values for the (unreset) register file.
-    for (size_t i = 0; i < 32; i++) {
-        root->soc_top__DOT__u_core__DOT__u_regfile__DOT__regs[i] = 0;
-    }
+    uint32_t *regs = find_words(ctx, "TOP.soc_top.u_core.u_regfile", "regs", 32);
+    std::fill(regs, regs + 32, 0);
     return true;
 }
 
@@ -169,7 +187,7 @@ int main(int argc, char **argv) {
 
     auto ctx = std::make_unique<VerilatedContext>();
     auto top = std::make_unique<Vsoc_top>(ctx.get());
-    if (!load_program(*top, opt.elf)) {
+    if (!load_program(*ctx, opt.elf)) {
         return EXIT_USAGE;
     }
 
