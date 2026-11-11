@@ -3,7 +3,9 @@
 // vendor tools infer as block RAM, or as LUT RAM when it is small.
 //
 // No reset and no read-during-write guarantee: callers never read an address
-// in the same cycle it is written.
+// in the same cycle it is written. no_rw_check tells Yosys so; without it,
+// Yosys adds a bypass register and comparator to emulate read-first
+// behavior on every block RAM.
 module npu_sdp_ram #(
   parameter  int WIDTH = 32,
   parameter  int DEPTH = 256,
@@ -17,7 +19,7 @@ module npu_sdp_ram #(
   output logic [WIDTH-1:0] rdata
 );
 
-  logic [WIDTH-1:0] mem [0:DEPTH-1];
+  (* no_rw_check *) logic [WIDTH-1:0] mem [0:DEPTH-1];
 
   always_ff @(posedge clk) begin
     if (we) mem[waddr] <= wdata;
