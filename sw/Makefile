@@ -62,15 +62,23 @@ bench: all
 	  --elf-dir $(BUILD_DIR)/sw --out-dir $(BUILD_DIR)/bench
 
 # IMEM holds .text; DMEM holds .rodata, .data and .bss, plus the stack that
-# the linker script reserves at the top (8 KiB unless STACK_SIZE is set).
+# the linker script reserves. The stack size is read from each ELF's
+# STACK_SIZE symbol (set by link.ld, 8 KiB unless a program overrides it).
+RV_NM      ?= $(LLVM_PREFIX)llvm-nm
+DMEM_BYTES := 262144
 size: all
-	@printf '%-12s %10s %10s %16s\n' program "IMEM (B)" "DMEM (B)" "DMEM+stack (%)"
+	@printf '%-14s %10s %10s %10s %16s\n' program "IMEM (B)" "DMEM (B)" "stack (B)" "DMEM+stack (%)"
 	@for p in $(PROGRAMS); do \
-	  $(RV_SIZE) -A $(BUILD_DIR)/sw/$$p.elf | awk -v p=$$p ' \
+	  elf=$(BUILD_DIR)/sw/$$p.elf; \
+	  stack=$$($(RV_NM) -t d $$elf | awk '$$3 == "STACK_SIZE" { print $$1 + 0 }'); \
+	  $(RV_SIZE) -A $$elf | awk -v p=$$p -v stack=$$stack ' \
 	    $$1 ~ /^\.text/ { imem += $$2 } \
 	    $$1 ~ /^\.(rodata|s?data|s?bss)/ { dmem += $$2 } \
-	    END { printf "%-12s %10d %10d %15.1f%%\n", p, imem, dmem, 100 * (dmem + 8192) / 262144 }'; \
+	    END { printf "%-14s %10d %10d %10d %15.1f%%\n", p, imem, dmem, stack, \
+	          100 * (dmem + stack) / $(DMEM_BYTES) }'; \
 	done
 
+# Everything this Makefile writes lives under BUILD_DIR.
 clean:
-	rm -rf ../build/sw
+	$(if $(strip $(BUILD_DIR)),,$(error BUILD_DIR is empty))
+	rm -rf $(BUILD_DIR)/sw $(BUILD_DIR)/bench
