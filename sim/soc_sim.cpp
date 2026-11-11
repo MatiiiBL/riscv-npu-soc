@@ -49,56 +49,89 @@ struct Options {
     const char *elf = nullptr;
 };
 
-[[noreturn]] void usage(const char *msg) {
-    if (msg != nullptr) {
-        std::fprintf(stderr, "soc_sim: %s\n", msg);
-    }
-    std::fprintf(stderr,
-                 "usage: soc_sim [--max-cycles N] [--commit-log FILE] [--vcd FILE] [--stats] "
-                 "[--quiet] program.elf\n");
-    std::exit(EXIT_USAGE);
+void print_usage(std::FILE *out) {
+    std::fputs(
+        "usage: soc_sim [options] program.elf\n"
+        "\n"
+        "Verilator model of the Pulse SoC.\n"
+        "\n"
+        "  --max-cycles N     stop with exit code 124 after N clock cycles (default 100000000)\n"
+        "  --commit-log FILE  write one line per retired instruction to FILE\n"
+        "  --vcd FILE         write a waveform of the whole run to FILE\n"
+        "  --stats            print the performance counters on stderr\n"
+        "  --quiet            do not print the summary line on stderr\n"
+        "  -h, --help         show this help\n"
+        "\n"
+        "Exit code: 0 on SIM_EXIT = 0, else (value & 0xff) or 1 if that is 0;\n"
+        "2 on ECALL/EBREAK, 3 on an illegal instruction, 124 on --max-cycles,\n"
+        "125 on a usage, ELF or I/O error.\n",
+        out);
 }
 
-Options parse_args(int argc, char **argv) {
-    Options opt;
+// Decimal only, like the ISS: no sign, no 0x prefix, no trailing characters.
+bool parse_uint(const char *text, uint64_t &value) {
+    if (*text < '0' || *text > '9') {
+        return false;
+    }
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long long v = std::strtoull(text, &end, 10);
+    if (errno != 0 || *end != '\0') {
+        return false;
+    }
+    value = v;
+    return true;
+}
+
+// The same command line as the ISS (tools/iss/main.cpp, spec 7.1), plus
+// --vcd. Returns 0 on success, otherwise the process exit code to use.
+int parse_args(int argc, char **argv, Options &opt) {
     for (int i = 1; i < argc; i++) {
         const std::string arg = argv[i];
-        auto value = [&]() -> const char * {
-            if (i + 1 >= argc) {
-                usage((arg + " needs a value").c_str());
-            }
-            return argv[++i];
-        };
-        if (arg == "--max-cycles") {
-            const char *v = value();
-            char *end = nullptr;
-            errno = 0;
-            opt.max_cycles = std::strtoull(v, &end, 0);
-            if (errno != 0 || end == v || *end != '\0') {
-                usage("--max-cycles needs a number");
-            }
-        } else if (arg == "--commit-log") {
-            opt.commit_log = value();
-        } else if (arg == "--vcd") {
-            opt.vcd = value();
-        } else if (arg == "--stats") {
-            opt.stats = true;
-        } else if (arg == "--quiet") {
-            opt.quiet = true;
-        } else if (arg == "-h" || arg == "--help") {
-            usage(nullptr);
-        } else if (!arg.empty() && arg[0] == '-') {
-            usage(("unknown option " + arg).c_str());
-        } else if (opt.elf != nullptr) {
-            usage("more than one program given");
-        } else {
-            opt.elf = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_usage(stdout);
+            std::exit(0);
         }
+        if (arg == "--quiet") {
+            opt.quiet = true;
+            continue;
+        }
+        if (arg == "--stats") {
+            opt.stats = true;
+            continue;
+        }
+        if (arg == "--max-cycles" || arg == "--commit-log" || arg == "--vcd") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "soc_sim: %s needs a value\n", arg.c_str());
+                return EXIT_USAGE;
+            }
+            const char *value = argv[++i];
+            if (arg == "--commit-log") {
+                opt.commit_log = value;
+            } else if (arg == "--vcd") {
+                opt.vcd = value;
+            } else if (!parse_uint(value, opt.max_cycles)) {
+                std::fprintf(stderr, "soc_sim: bad value for %s: '%s'\n", arg.c_str(), value);
+                return EXIT_USAGE;
+            }
+            continue;
+        }
+        if (arg.size() > 1 && arg[0] == '-') {
+            std::fprintf(stderr, "soc_sim: unknown option '%s'\n", arg.c_str());
+            print_usage(stderr);
+            return EXIT_USAGE;
+        }
+        if (opt.elf != nullptr) {
+            std::fprintf(stderr, "soc_sim: more than one program given\n");
+            return EXIT_USAGE;
+        }
+        opt.elf = argv[i];
     }
     if (opt.elf == nullptr) {
-        usage("no program given");
+        print_usage(stderr);
+        return EXIT_USAGE;
     }
-    return opt;
+    return 0;
 }
 
 // Returns the 32-bit word array `var` of the instance `scope`, made visible by
@@ -121,34 +154,12 @@ uint32_t *find_words(const VerilatedContext &ctx, const std::string &scope, cons
 // word not covered by a segment is zero. DMEM word w lives in bank
 // w mod banks at row w / banks (rtl/soc/soc_dmem.sv).
 bool load_program(const VerilatedContext &ctx, const char *path) {
-    std::vector<ElfSegment> segments;
-    std::string error;
-    if (!load_elf32(path, segments, error)) {
-        std::fprintf(stderr, "soc_sim: %s\n", error.c_str());
-        return false;
-    }
-
     std::vector<uint8_t> imem(IMEM_SIZE, 0);
     std::vector<uint8_t> dmem(DMEM_SIZE, 0);
-    for (const ElfSegment &seg : segments) {
-        const uint64_t start = seg.paddr;
-        const uint64_t end = start + seg.bytes.size();
-        std::vector<uint8_t> *mem = nullptr;
-        uint64_t base = 0;
-        if (start >= IMEM_BASE && end <= uint64_t{IMEM_BASE} + IMEM_SIZE) {
-            mem = &imem;
-            base = IMEM_BASE;
-        } else if (start >= DMEM_BASE && end <= uint64_t{DMEM_BASE} + DMEM_SIZE) {
-            mem = &dmem;
-            base = DMEM_BASE;
-        } else {
-            std::fprintf(stderr,
-                         "soc_sim: %s: segment 0x%08" PRIx64 "-0x%08" PRIx64
-                         " is outside IMEM and DMEM\n",
-                         path, start, end);
-            return false;
-        }
-        std::copy(seg.bytes.begin(), seg.bytes.end(), mem->begin() + (start - base));
+    std::string error;
+    if (!load_elf32(path, {{IMEM_BASE, &imem}, {DMEM_BASE, &dmem}}, error)) {
+        std::fprintf(stderr, "soc_sim: %s\n", error.c_str());
+        return false;
     }
 
     auto word = [](const std::vector<uint8_t> &m, size_t i) {
@@ -198,7 +209,10 @@ int exit_code_for(uint32_t value) {
 }  // namespace
 
 int main(int argc, char **argv) {
-    const Options opt = parse_args(argc, argv);
+    Options opt;
+    if (const int rc = parse_args(argc, argv, opt)) {
+        return rc;
+    }
 
     auto ctx = std::make_unique<VerilatedContext>();
     auto top = std::make_unique<Vsoc_top>(ctx.get());

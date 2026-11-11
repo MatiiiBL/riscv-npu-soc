@@ -1,8 +1,10 @@
 # Directed pipeline tests for rv32_core (docs/core.md, "Verification").
 #
 #   make          build the tests and both simulators, run every test on
-#                 build/sim/soc_sim and build/sim/soc_sim_bp0
+#                 build/sim/soc_sim and build/sim/soc_sim_bp0, then `cli`
 #   make build    only build the test ELFs into build/verif/core/
+#   make cli      check that soc_sim accepts and rejects the same command
+#                 lines and ELF files as the ISS (sim_cli.py)
 #
 # Each test is a bare-metal assembly program that checks its own results and
 # reports through SIM_EXIT like the riscv-tests (0 = pass, (case << 1) | 1 =
@@ -36,8 +38,8 @@ ELFS := $(TESTS:%=$(OUT)/%.elf) $(OUT)/timing_bp1.elf $(OUT)/timing_bp0.elf
 # test:expected_exit:expected_stdout, one word per run of a simulator.
 specs = $(foreach t,$(TESTS),$(OUT)/$(t).elf:$(or $(EXPECT_$(t)),0):$(if $(wildcard $(t).out),$(t).out,-))
 
-.PHONY: all build sims run clean
-all: run
+.PHONY: all build sims run cli clean
+all: run cli
 
 build: $(ELFS)
 
@@ -55,6 +57,10 @@ $(OUT):
 sims:
 	$(MAKE) -C $(REPO_ROOT)/sim BP_MODE=1
 	$(MAKE) -C $(REPO_ROOT)/sim BP_MODE=0
+	$(MAKE) -C $(REPO_ROOT)/tools/iss
+
+cli: build sims
+	$(PYTHON) sim_cli.py $(OUT)/fwd.elf $(OUT)/sim_cli $(SIM_BP1) $(ISS)
 
 run: build sims
 	@pass=0; fail=0; \
