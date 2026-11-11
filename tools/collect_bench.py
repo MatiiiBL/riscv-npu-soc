@@ -11,8 +11,10 @@ its exit code, collects those lines and writes
     <out-dir>/results.json   every record, plus per-run metadata
     <out-dir>/results.md     one Markdown table per benchmark
 
-It exits nonzero if any benchmark fails or prints no BENCH line, so it can
-gate a build. Standard library only.
+It exits nonzero if any benchmark fails, prints no BENCH line or runs past
+--timeout, so it can gate a build. A benchmark that times out is killed
+and still reported (status "TIMED OUT", "timed_out": true in the JSON),
+with whatever BENCH lines it printed before. Standard library only.
 
 Usage:
     tools/collect_bench.py --sim build/sim/soc_sim [--elf-dir build/sw]
@@ -47,33 +49,59 @@ def parse_pairs(text):
     return dict(pair.split("=", 1) for pair in text.split())
 
 
+def as_text(output):
+    """Captured output as str: TimeoutExpired carries bytes (or None) even
+    when the process was run with text=True."""
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output
+
+
 def run_benchmark(sim, elf, max_cycles, timeout):
     cmd = [str(sim)]
     if max_cycles is not None:
         cmd += ["--max-cycles", str(max_cycles)]
     cmd.append(str(elf))
     start = time.monotonic()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        exit_code, stdout, stderr, timed_out = proc.returncode, proc.stdout, proc.stderr, False
+    except subprocess.TimeoutExpired as exc:
+        # run() has killed the simulator; keep what it printed until then.
+        exit_code, stdout, stderr, timed_out = None, as_text(exc.stdout), as_text(exc.stderr), True
     wall = time.monotonic() - start
 
     records = []
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         m = BENCH_LINE.match(line)
         if m:
             records.append({"bench": m.group(1), "case": m.group(2), **parse_pairs(m.group(3))})
     summary = {}
-    for line in proc.stderr.splitlines():
+    for line in stderr.splitlines():
         m = SIM_SUMMARY.match(line)
         if m:
             summary = {"model": m.group(1), **parse_pairs(m.group(2))}
     return {
         "elf": str(elf),
-        "exit_code": proc.returncode,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
         "wall_seconds": round(wall, 2),
         "sim_summary": summary,
         "records": records,
-        "stdout": proc.stdout,
+        "stdout": stdout,
     }
+
+
+def status_text(run):
+    if run["timed_out"]:
+        return "TIMED OUT (killed at the --timeout limit)"
+    if run["exit_code"] != 0:
+        return f"FAILED (exit code {run['exit_code']})"
+    if not run["records"]:
+        return "FAILED (no BENCH lines)"
+    return "passed"
 
 
 def markdown_tables(records):
@@ -107,9 +135,9 @@ def write_markdown(path, sim, runs):
         )
     for name, run in runs.items():
         out.append(f"## {name}\n")
-        status = "passed" if run["exit_code"] == 0 else f"FAILED (exit code {run['exit_code']})"
         details = ", ".join(f"{k}={v}" for k, v in run["sim_summary"].items() if k != "model")
-        out.append(f"Run {status} in {run['wall_seconds']} s wall time; simulator: {details or 'n/a'}.\n")
+        out.append(f"Run {status_text(run)} in {run['wall_seconds']} s wall time; "
+                   f"simulator: {details or 'n/a'}.\n")
         out.extend(markdown_tables(run["records"]))
     path.write_text("\n".join(out))
 
@@ -140,10 +168,9 @@ def main():
         print(f"running {name} on {sim.name} ...", flush=True)
         run = run_benchmark(sim, elf, args.max_cycles, args.timeout)
         runs[name] = run
-        ok = run["exit_code"] == 0 and run["records"]
-        print(f"  {'ok' if ok else 'FAILED'}: exit {run['exit_code']}, "
-              f"{len(run['records'])} BENCH lines, {run['wall_seconds']} s")
-        if not ok:
+        status = status_text(run)
+        print(f"  {status}: {len(run['records'])} BENCH lines, {run['wall_seconds']} s")
+        if status != "passed":
             failed.append(name)
             sys.stdout.write(run["stdout"])
 
