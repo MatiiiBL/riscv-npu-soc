@@ -1,0 +1,23 @@
+# Build output
+build/
+obj_dir/
+*.vcd
+*.fst
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# cocotb
+sim_build/
+results.xml
+
+# Datasets (downloaded by models/mnist/train.py)
+models/mnist/data/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
