@@ -17,9 +17,12 @@ compares their commit logs. Every generated program
   region-edge addresses that read 0; DMEM's first and last words; IMEM,
   whose data-port stores are dropped); no cycle/time CSR reads (they differ
   between the RTL and the ISS by design), no traps;
-- ends with `sw zero` to SIM_EXIT, or (about a quarter of the seeds) with
-  ECALL, EBREAK, an illegal instruction or a fetch outside IMEM or from a
-  misaligned pc. The header names the exit code both models must report.
+- ends with `sw zero` to SIM_EXIT, or (27 % of the seeds) with ECALL,
+  EBREAK, an illegal instruction, a fetch outside IMEM, a JALR, JAL or taken
+  branch to a misaligned target, or by falling off the end of IMEM; some
+  SIM_EXIT endings first run code in the last IMEM words, whose wrong-path
+  fetch past the end must not halt. The header names the exit code both
+  models must report.
 
 The program is a sequence of "snippets" (an ALU op, a load followed by a
 dependent use, a forward branch, a loop, ...). Branch targets are only ever
@@ -83,9 +86,14 @@ DMEM_EDGES = ["DMEM_BASE", "DMEM_BASE + DMEM_SIZE - 4"]
 
 # How a program ends, with the exit code both models must report (spec 7.1).
 # Most end with SIM_EXIT = 0; the rest halt so those paths are compared too.
-ENDINGS = [(75, "exit"), (5, "ecall"), (5, "ebreak"), (5, "illegal"), (5, "fetch_outside"),
-           (5, "fetch_misaligned")]
-EXIT_CODES = {"exit": 0, "ecall": 2, "ebreak": 2, "illegal": 3, "fetch_outside": 3, "fetch_misaligned": 3}
+ENDINGS = [(70, "exit"), (4, "ecall"), (4, "ebreak"), (4, "illegal"), (3, "fetch_outside"),
+           (3, "fetch_misaligned"), (3, "branch_misaligned"), (3, "jal_misaligned"),
+           (3, "wrongpath_end"), (3, "fetch_end")]
+EXIT_CODES = {"exit": 0, "ecall": 2, "ebreak": 2, "illegal": 3, "fetch_outside": 3, "fetch_misaligned": 3,
+              "branch_misaligned": 3, "jal_misaligned": 3, "wrongpath_end": 0, "fetch_end": 3}
+# The *_end endings run their last code in this many bytes at the top of
+# IMEM. At the maximum --length the program text stays below 52 KiB.
+END_WINDOW = 128
 # Reserved encodings: all zeros, all ones, MRET and WFI (no privileged mode),
 # a custom-0 opcode, and an RV64-only shift amount.
 ILLEGAL_WORDS = [0x00000000, 0xFFFFFFFF, 0x30200073, 0x10500073, 0x0000000B, 0x02009093]
@@ -168,6 +176,7 @@ class Generator:
         self.pending = []       # [label, snippets left] of forward branches
         self.hot = []           # recently used scratch offsets, to create RAW hazards
         self.subs = []          # (name, link register, lines)
+        self.window = []        # lines placed at the top of IMEM, after the subroutines
 
     # -- output -----------------------------------------------------------
 
@@ -343,6 +352,14 @@ class Generator:
 
     def jal(self):
         self.emit(f"jal {x(self.dest())}, {self.forward_label()}")
+
+    def untaken_misaligned(self):
+        """A branch that is never taken, to a target 2 bytes past an
+        instruction boundary. Only a taken branch fetches its target, so
+        this must not halt (spec 2)."""
+        r = self.src()
+        op = self.rng.choice(["bne", "blt", "bltu"])
+        self.emit(f"{op} {x(r)}, {x(r)}, {self.forward_label()} + 2")
 
     def jalr(self):
         target = self.forward_label()
@@ -521,7 +538,7 @@ class Generator:
         (14, alu_rr), (12, alu_ri), (3, upper), (9, muldiv), (3, shift_reg),
         (10, load), (9, store), (3, computed_address), (2, pointer_chase),
         (9, forward_branch), (3, jal), (3, jalr), (3, csr), (6, chain),
-        (1, uart), (3, device), (1, fence),
+        (1, uart), (3, device), (1, fence), (1, untaken_misaligned),
     ]
 
     def snippet(self, context):
@@ -579,13 +596,134 @@ class Generator:
         elif self.ending == "fetch_outside":
             self.emit(f"li {x(t)}, {self.rng.choice(BAD_FETCH_TARGETS)}")
             self.emit(f"jalr {x(self.dest())}, 0({x(t)})")
-        else:
+        elif self.ending == "fetch_misaligned":
             # JALR clears only bit 0 of the target, so offset 2 leaves it
             # misaligned; the core halts at the target (spec 2).
             self.emit(f"lla {x(t)}, halt")
             self.emit(f"jalr {x(self.dest())}, 2({x(t)})")
+        elif self.ending in ("branch_misaligned", "jal_misaligned"):
+            self.misaligned_jump(self.ending == "jal_misaligned")
+        else:
+            self.end_of_imem(self.ending == "fetch_end")
+            return
         self.label("halt")
         self.emit("j halt")
+
+    def misaligned_jump(self, jal):
+        """A JAL or a taken branch to a target 2 bytes past an instruction
+        boundary (the encodings cannot set bit 0). The jump retires and the
+        core halts at the target (spec 2)."""
+        kind = self.rng.below(3)
+        if kind == 0:
+            target = "halt + 2"         # the word right after the jump
+        elif kind == 1 or not jal:
+            back = self.new_label("mis")
+            self.label(back)
+            for _ in range(self.rng.range(0, 3)):
+                self.alu_rr()
+            target = f"{back} + 2"
+        else:
+            target = "_start + 2"       # far back, out of a branch's reach
+        if jal:
+            self.emit(f"jal {x(self.dest())}, {target}")
+            return
+        op = self.rng.choice(BRANCH_OPS)
+        if op in ("beq", "bge", "bgeu"):
+            a = b = self.src()          # equal operands: taken
+        else:
+            # A fresh operand, so the branch also depends on the instruction
+            # before it: 0 < t (signed and unsigned), or t < 0 for blt.
+            t = self.dest(False)
+            negative = op == "blt" and self.rng.chance(50)
+            self.emit(f"addi {x(t)}, x0, {-self.rng.range(1, 2048) if negative else self.rng.range(1, 2047)}")
+            a, b = (t, 0) if negative else (0, t)
+            if op == "bne" and self.rng.chance(50):
+                a, b = b, a
+        self.emit(f"{op} {x(a)}, {x(b)}, {target}")
+
+    def end_of_imem(self, fall):
+        """Code in the last words of IMEM, run 1 to 3 times. For
+        wrongpath_end its last word jumps back, so the sequential fetch past
+        it, from 0x10000 outside IMEM, is on the wrong path and must not
+        halt, cold or with the predictor trained; the program then exits 0.
+        For fetch_end the last word is a branch taken on every pass but the
+        last, which falls off the end of IMEM and halts at 0x10000 (spec 2)."""
+        c = x(self.counter)
+        self.emit(f"li {c}, {self.rng.range(1, 3)}")
+        self.goto("tail")
+        main, self.lines = self.lines, []
+
+        # Built with exact word counts: an .org that the code overruns is an
+        # assembler error, and a gap before the last word is the illegal
+        # word 0, which halts with exit 3 instead of the expected code.
+        self.lines.append(f"    .org IMEM_SIZE - {END_WINDOW}")
+        self.label("back")
+        if fall:
+            self.goto("tail")
+        else:
+            self.emit(f"{self.rng.choice([f'bne {c}, x0', f'blt x0, {c}', f'bltu x0, {c}'])}, tail")
+            t = self.rng.choice(self.writable)
+            self.emit(f"li {x(t)}, SIM_EXIT")
+            self.emit(f"sw x0, 0({x(t)})")
+            self.label("halt")
+            self.emit("j halt")
+        body = [f"addi {c}, {c}, -1"]
+        saved, self.lines = self.lines, []
+        for _ in range(self.rng.range(0, 5)):
+            self.single_op()
+        body += [line.strip() for line in self.lines]
+        self.lines = saved
+        if fall:
+            last = f"{self.rng.choice([f'bne {c}, x0', f'blt x0, {c}', f'bltu x0, {c}'])}, back"
+        else:
+            kind = self.rng.below(4)
+            if kind == 0:
+                last = "j back"
+            elif kind == 1:
+                last = f"jal {x(self.dest())}, back"
+            elif kind == 2:
+                r = self.src()
+                last = f"{self.rng.choice(['beq', 'bge', 'bgeu'])} {x(r)}, {x(r)}, back"
+            else:
+                t = self.dest(False)
+                body += [f"lla {x(t)}, back"]                   # auipc + addi
+                last = f"jalr {x(self.dest())}, 0({x(t)})"
+        words = len(body) + body[-1].startswith("lla")
+        self.lines.append(f"    .org IMEM_SIZE - {4 * (words + 1)}")
+        self.label("tail")
+        for line in body:
+            self.emit(line)
+        self.lines.append("    .org IMEM_SIZE - 4")
+        self.emit(last)
+        self.window, self.lines = self.lines, main
+
+    def goto(self, label):
+        """An unconditional jump that may write a link register."""
+        kind = self.rng.below(3)
+        if kind == 0:
+            self.emit(f"j {label}")
+        elif kind == 1:
+            self.emit(f"jal {x(self.dest())}, {label}")
+        else:
+            t = self.dest(False)
+            self.emit(f"lla {x(t)}, {label}")
+            self.emit(f"jalr {x(self.dest())}, 0({x(t)})")
+
+    def single_op(self):
+        """A random instruction that assembles to exactly one word."""
+        kind = self.rng.below(5)
+        if kind == 0:
+            self.alu_rr()
+        elif kind == 1:
+            self.alu_ri()
+        elif kind == 2:
+            self.emit(f"{self.rng.choice(M_OPS)} {x(self.dest())}, {x(self.src())}, {x(self.src())}")
+        elif kind == 3:
+            op, width = self.rng.choice(LOADS)
+            self.emit(f"{op} {x(self.dest())}, {self.offset(width)}({x(self.base)})")
+        else:
+            op, width = self.rng.choice(STORES)
+            self.emit(f"{op} {x(self.src())}, {self.offset(width)}({x(self.base)})")
 
     def program(self):
         self.lines.append(f"    lla {x(self.base)}, scratch + {SCRATCH_BYTES // 2}")
@@ -599,6 +737,7 @@ class Generator:
         self.finish()
         for _, _, lines in self.subs:
             self.lines.extend(lines)
+        self.lines.extend(self.window)
 
         # The buffer contents come from their own stream, so a shorter
         # --length yields a prefix of the same program with the same data:

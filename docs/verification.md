@@ -154,12 +154,19 @@ builds with the normal firmware flags, `sw/common/link.ld` and
   on `--seed` and `--length`, not on the Python version. The buffer contents
   come from a separate stream, so a shorter `--length` produces a prefix of the
   same program with the same data and the same ending (see 4.4).
-- **ends in a known way.** Three quarters of the seeds end with `sw zero` to
-  `SIM_EXIT`; the rest end with `ECALL` or `EBREAK` (exit 2), a reserved
-  encoding (`0`, all ones, `MRET`, `WFI`, a custom opcode, an RV64-only shift;
-  exit 3), or a jump outside IMEM or to a misaligned pc (exit 3, spec 2). The
-  file header names the exit code, which the random flow requires from both
-  models; `--ending` forces one.
+- **ends in a known way.** 70 % of the seeds end with `sw zero` to
+  `SIM_EXIT`. Another 3 % do too, but first run code placed in the last
+  words of IMEM one to three times, whose last word jumps back: the
+  sequential fetch past it, from `0x10000`, is on the wrong path and must not
+  halt, whether the predictor is cold or trained. The rest end with `ECALL`
+  or `EBREAK` (exit 2), a reserved encoding (`0`, all ones, `MRET`, `WFI`, a
+  custom opcode, an RV64-only shift; exit 3), or a bad fetch (exit 3, spec
+  2): a `JALR` outside IMEM; a `JALR`, `JAL` or taken branch to a target 2
+  bytes past an instruction boundary; or falling off the end of IMEM, from
+  the same end-of-IMEM code with a branch that falls through on its last
+  pass after the predictor learned it as taken. The file header names the
+  exit code, which the random flow requires from both models; `--ending`
+  forces one.
 
 The program is a random sequence of snippets, chosen to be hazard-dense:
 
@@ -172,7 +179,8 @@ The program is a random sequence of snippets, chosen to be hazard-dense:
   by the preceding `addi`, and a pointer loaded from memory and used at once;
 - a loaded value used immediately by an ALU op, a branch, a store (as data)
   or a `JALR` (as the target);
-- forward branches of all six kinds on equal, zero, fresh or random operands;
+- forward branches of all six kinds on equal, zero, fresh or random operands,
+  and never-taken branches to a misaligned target, which must not halt;
   `JAL`, and `JALR` with offsets, with bit 0 set, with `rd == rs1`, and through
   a target loaded from memory;
 - dependent chains of 2 to 5 ALU/M ops, writes to `x0`, `instret`/`instreth`/
@@ -189,12 +197,12 @@ The program is a random sequence of snippets, chosen to be hazard-dense:
   width; DMEM's first and last words; and a store over the next instruction,
   which must not change what executes.
 
-Over 40 seeds of 2000 instructions (about 98,000 executed instructions) every
-branch type is both taken and not taken hundreds of times, backward loop
-branches are taken about 2500 times, and there are about 4300 load-use pairs
-(into ALU/address, branch, store data and `JALR`). Of the 19,000 loads and
-stores, about 1100 go to MMIO, 660 to NPU registers, 320 to IMEM and 140 to
-unmapped regions. The base and counter registers are picked per seed, so no
+Over 40 seeds of 2000 instructions (about 100,000 executed instructions) every
+branch type is both taken and not taken hundreds of times, backward branches
+are taken about 2600 times, and there are about 4500 load-use pairs (into
+ALU/address, branch, store data and `JALR`). Of the 19,600 loads and stores,
+about 1100 go to MMIO, 620 to NPU registers, 330 to IMEM and 160 to unmapped
+regions. The base and counter registers are picked per seed, so no
 register is permanently left out of the hazard mix.
 
 ### 4.2 Comparison
