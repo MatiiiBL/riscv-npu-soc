@@ -36,7 +36,10 @@ SECTIONS
     } > DMEM
 
     _end = .;
-    _stack_top = ORIGIN(DMEM) + LENGTH(DMEM);
+    /* The stack grows down from the top of DMEM, unless a program moves it
+     * (-Wl,--defsym=STACK_TOP=<16-byte aligned address>) to keep the end of
+     * DMEM for itself. */
+    _stack_top = DEFINED(STACK_TOP) ? STACK_TOP : ORIGIN(DMEM) + LENGTH(DMEM);
     ASSERT(_end + STACK_SIZE <= _stack_top, "DMEM overflow: data + stack do not fit")
 
     /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }

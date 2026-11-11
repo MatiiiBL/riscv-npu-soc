@@ -55,7 +55,9 @@ places each ELF segment at its address directly, so `crt0` copies nothing:
 it sets `sp` and `gp`, clears `.bss`, calls `main()` and writes its return
 value to `SIM_EXIT`. A program passes by returning 0. The linker script
 reserves 8 KiB of stack (`-Wl,--defsym=STACK_SIZE=...` to change) and fails
-the link if data plus stack would not fit.
+the link if data plus stack would not fit. The stack starts at the end of
+DMEM unless a program sets `-Wl,--defsym=STACK_TOP=...` (16-byte aligned):
+`npu_oob` does, because its cases use the last bytes of DMEM.
 
 Footprint of every program (`make -C sw size`):
 
@@ -256,6 +258,7 @@ ARR = 8 output, so those runs are judged by the exit code.
 | `muldiv` | all 8 M instructions via inline asm against a reference with no M instructions, on all pairs of 16 corner operands, 500 random pairs, the ISA's division corner cases as literals, and back-to-back dependent chains |
 | `npu_gemm` | the NPU against `sw_gemm` (pinned by literal known answers): random tiles, edge shapes, every write-back option, NO_WB / ACC_KEEP sequences, A_KEEP / B_KEEP on commands that must reload, all 13 invalid-command cases, tiled GEMMs, a linear layer; whole canary-filled output buffers are compared, so stray writes fail too. On arrays narrower than 4 it checks that `npu_gemm()` refuses INT8 output wider than one tile (`NPU_UNSUPPORTED`) without writing anything |
 | `npu_ksplit` | K beyond KMAX through `npu_gemm` and by hand with uneven chunks; each line prints the number of commands the driver started (`npu_commands()`), so `expected.txt` also pins how many commands a GEMM costs |
+| `npu_oob` | NPU DMA outside DMEM reads 0 and drops writes: A in IMEM and past the end of DMEM, B and the bias straddling the end, C's second row past the end, C in the MMIO window (on `UART_TX` and `SIM_EXIT`); the out-of-range accesses sit 256 KiB above known buffers, so a DMA that wrapped the address back into DMEM is caught |
 
 ## Benchmarks
 

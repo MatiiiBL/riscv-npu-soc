@@ -1,0 +1,10 @@
+npu_oob: NPU DMA outside DMEM
+A in IMEM: 1000 -1000 1000 -1000 ok
+A past DMEM: 1000 -1000 1000 -1000 ok
+B straddles DMEM end: 1030 77777777 970 77777777 ok
+bias straddles DMEM end: 536 32 464 -32 ok
+C row 1 past DMEM: 1036 -968 ok
+  wrapped row 1: 77777777 77777777 ok
+C in MMIO: rc=0, still running ok
+first 16 bytes of DMEM unchanged ok
+PASS
