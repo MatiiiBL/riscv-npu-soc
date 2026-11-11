@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 500" width="920" height="500" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="920" height="500" rx="10" fill="#ffffff"/>
+  <rect x="10" y="10" width="900" height="480" rx="10" fill="none" stroke="#d1d5db" stroke-dasharray="6 4"/>
+  <text x="24" y="32" font-size="12" fill="#6b7280">soc_top</text>
+
+  <!-- CPU core -->
+  <rect x="30" y="48" width="390" height="168" rx="8" fill="#eef4ff" stroke="#3b6fd8" stroke-width="1.5"/>
+  <text x="44" y="70" font-weight="600" fill="#1e3a8a">rv32_core: RV32IM + Zicsr, 5-stage in-order</text>
+  <g font-size="12" text-anchor="middle" fill="#1e3a8a">
+    <rect x="44" y="84" width="62" height="40" rx="5" fill="#ffffff" stroke="#3b6fd8"/><text x="75" y="109">IF</text>
+    <rect x="118" y="84" width="62" height="40" rx="5" fill="#ffffff" stroke="#3b6fd8"/><text x="149" y="109">ID</text>
+    <rect x="192" y="84" width="62" height="40" rx="5" fill="#ffffff" stroke="#3b6fd8"/><text x="223" y="109">EX</text>
+    <rect x="266" y="84" width="62" height="40" rx="5" fill="#ffffff" stroke="#3b6fd8"/><text x="297" y="109">MEM</text>
+    <rect x="340" y="84" width="62" height="40" rx="5" fill="#ffffff" stroke="#3b6fd8"/><text x="371" y="109">WB</text>
+  </g>
+  <g stroke="#3b6fd8" stroke-width="1.2" marker-end="url(#arrow)">
+    <line x1="106" y1="104" x2="116" y2="104"/>
+    <line x1="180" y1="104" x2="190" y2="104"/>
+    <line x1="254" y1="104" x2="264" y2="104"/>
+    <line x1="328" y1="104" x2="338" y2="104"/>
+  </g>
+  <g font-size="12" fill="#374151">
+    <text x="44" y="148">BTB + 2-bit BHT branch prediction</text>
+    <text x="44" y="166">ALU forwarding, load and multiply interlocks</text>
+    <text x="44" y="184">iterative divider, cycle/instret counters</text>
+    <text x="44" y="202">RVFI-style retire port → commit log</text>
+  </g>
+
+  <!-- IMEM -->
+  <rect x="30" y="262" width="180" height="58" rx="8" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="120" y="286" text-anchor="middle" font-weight="600" fill="#111827">IMEM 64 KiB</text>
+  <text x="120" y="305" text-anchor="middle" font-size="12" fill="#4b5563">block RAM, fetch only</text>
+  <line x1="75" y1="216" x2="75" y2="260" stroke="#374151" stroke-width="1.4" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="84" y="244" font-size="11" fill="#4b5563">fetch</text>
+
+  <!-- Firmware / sim -->
+  <rect x="236" y="262" width="184" height="58" rx="8" fill="#ffffff" stroke="#9ca3af" stroke-dasharray="4 3"/>
+  <text x="328" y="286" text-anchor="middle" font-size="12" fill="#374151">ELF loader (Verilator) or</text>
+  <text x="328" y="304" text-anchor="middle" font-size="12" fill="#374151">$readmemh images (FPGA)</text>
+
+  <!-- Decoder -->
+  <rect x="470" y="70" width="128" height="124" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="534" y="118" text-anchor="middle" font-weight="600" fill="#4c1d95">address</text>
+  <text x="534" y="136" text-anchor="middle" font-weight="600" fill="#4c1d95">decoder</text>
+  <text x="534" y="156" text-anchor="middle" font-size="11" fill="#6b7280">addr[31:28]</text>
+  <line x1="420" y1="132" x2="468" y2="132" stroke="#374151" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="444" y="124" text-anchor="middle" font-size="11" fill="#4b5563">data</text>
+
+  <!-- MMIO -->
+  <rect x="650" y="30" width="250" height="52" rx="8" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="775" y="52" text-anchor="middle" font-weight="600" fill="#111827">MMIO</text>
+  <text x="775" y="70" text-anchor="middle" font-size="12" fill="#4b5563">UART TX · SIM_EXIT · LEDs</text>
+  <polyline points="598,90 624,90 624,56 648,56" fill="none" stroke="#374151" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <!-- DMEM -->
+  <rect x="650" y="108" width="250" height="96" rx="8" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="775" y="130" text-anchor="middle" font-weight="600" fill="#111827">DMEM 256 KiB</text>
+  <text x="775" y="148" text-anchor="middle" font-size="12" fill="#4b5563">4 word-interleaved banks,</text>
+  <text x="775" y="164" text-anchor="middle" font-size="12" fill="#4b5563">true dual-port block RAM</text>
+  <g font-size="11" fill="#6b7280" text-anchor="middle">
+    <rect x="664" y="174" width="50" height="20" rx="3" fill="#ffffff" stroke="#9ca3af"/><text x="689" y="188">bank 0</text>
+    <rect x="720" y="174" width="50" height="20" rx="3" fill="#ffffff" stroke="#9ca3af"/><text x="745" y="188">bank 1</text>
+    <rect x="776" y="174" width="50" height="20" rx="3" fill="#ffffff" stroke="#9ca3af"/><text x="801" y="188">bank 2</text>
+    <rect x="832" y="174" width="50" height="20" rx="3" fill="#ffffff" stroke="#9ca3af"/><text x="857" y="188">bank 3</text>
+  </g>
+  <line x1="598" y1="140" x2="648" y2="140" stroke="#374151" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="603" y="132" font-size="11" fill="#4b5563">port A</text>
+  <text x="604" y="156" font-size="11" fill="#4b5563">32-bit</text>
+
+  <!-- NPU -->
+  <rect x="440" y="244" width="460" height="236" rx="8" fill="#fff4ea" stroke="#e07a1f" stroke-width="1.5"/>
+  <text x="454" y="446" font-weight="600" fill="#9a3412">npu_top</text>
+  <text x="454" y="464" font-size="12" fill="#9a3412">accelerator</text>
+  <line x1="534" y1="194" x2="534" y2="278" stroke="#374151" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="541" y="224" font-size="11" fill="#4b5563">registers</text>
+  <g font-size="12" fill="#7c2d12" text-anchor="middle">
+    <rect x="454" y="280" width="150" height="44" rx="5" fill="#ffffff" stroke="#e07a1f"/>
+    <text x="529" y="298">control / status</text><text x="529" y="314">registers</text>
+    <rect x="736" y="280" width="150" height="44" rx="5" fill="#ffffff" stroke="#e07a1f"/>
+    <text x="811" y="298">DMA engine</text><text x="811" y="314">A_KEEP / B_KEEP reuse</text>
+    <rect x="454" y="362" width="140" height="56" rx="5" fill="#ffffff" stroke="#e07a1f"/>
+    <text x="524" y="386">operand buffers</text><text x="524" y="402">(block RAM, skewed)</text>
+    <rect x="754" y="362" width="132" height="56" rx="5" fill="#ffffff" stroke="#e07a1f"/>
+    <text x="820" y="386">bias · requantize</text><text x="820" y="402">ReLU · INT8 pack</text>
+  </g>
+  <line x1="604" y1="302" x2="734" y2="302" stroke="#e07a1f" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="669" y="296" text-anchor="middle" font-size="11" fill="#9a3412">START</text>
+  <polyline points="770,324 770,336 524,336 524,360" fill="none" stroke="#e07a1f" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="600" y="331" font-size="11" fill="#9a3412">A, B, bias</text>
+  <line x1="860" y1="360" x2="860" y2="326" stroke="#e07a1f" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <text x="866" y="348" font-size="11" fill="#9a3412">C</text>
+  <rect x="612" y="340" width="124" height="134" rx="5" fill="#ffffff" stroke="#e07a1f"/>
+  <g fill="#fde3cc" stroke="#e07a1f" stroke-width="0.6">
+      <rect x="630" y="348" width="9" height="9"/> <rect x="641" y="348" width="9" height="9"/> <rect x="652" y="348" width="9" height="9"/> <rect x="663" y="348" width="9" height="9"/> <rect x="674" y="348" width="9" height="9"/> <rect x="685" y="348" width="9" height="9"/> <rect x="696" y="348" width="9" height="9"/> <rect x="707" y="348" width="9" height="9"/>
+      <rect x="630" y="359" width="9" height="9"/> <rect x="641" y="359" width="9" height="9"/> <rect x="652" y="359" width="9" height="9"/> <rect x="663" y="359" width="9" height="9"/> <rect x="674" y="359" width="9" height="9"/> <rect x="685" y="359" width="9" height="9"/> <rect x="696" y="359" width="9" height="9"/> <rect x="707" y="359" width="9" height="9"/>
+      <rect x="630" y="370" width="9" height="9"/> <rect x="641" y="370" width="9" height="9"/> <rect x="652" y="370" width="9" height="9"/> <rect x="663" y="370" width="9" height="9"/> <rect x="674" y="370" width="9" height="9"/> <rect x="685" y="370" width="9" height="9"/> <rect x="696" y="370" width="9" height="9"/> <rect x="707" y="370" width="9" height="9"/>
+      <rect x="630" y="381" width="9" height="9"/> <rect x="641" y="381" width="9" height="9"/> <rect x="652" y="381" width="9" height="9"/> <rect x="663" y="381" width="9" height="9"/> <rect x="674" y="381" width="9" height="9"/> <rect x="685" y="381" width="9" height="9"/> <rect x="696" y="381" width="9" height="9"/> <rect x="707" y="381" width="9" height="9"/>
+      <rect x="630" y="392" width="9" height="9"/> <rect x="641" y="392" width="9" height="9"/> <rect x="652" y="392" width="9" height="9"/> <rect x="663" y="392" width="9" height="9"/> <rect x="674" y="392" width="9" height="9"/> <rect x="685" y="392" width="9" height="9"/> <rect x="696" y="392" width="9" height="9"/> <rect x="707" y="392" width="9" height="9"/>
+      <rect x="630" y="403" width="9" height="9"/> <rect x="641" y="403" width="9" height="9"/> <rect x="652" y="403" width="9" height="9"/> <rect x="663" y="403" width="9" height="9"/> <rect x="674" y="403" width="9" height="9"/> <rect x="685" y="403" width="9" height="9"/> <rect x="696" y="403" width="9" height="9"/> <rect x="707" y="403" width="9" height="9"/>
+      <rect x="630" y="414" width="9" height="9"/> <rect x="641" y="414" width="9" height="9"/> <rect x="652" y="414" width="9" height="9"/> <rect x="663" y="414" width="9" height="9"/> <rect x="674" y="414" width="9" height="9"/> <rect x="685" y="414" width="9" height="9"/> <rect x="696" y="414" width="9" height="9"/> <rect x="707" y="414" width="9" height="9"/>
+      <rect x="630" y="425" width="9" height="9"/> <rect x="641" y="425" width="9" height="9"/> <rect x="652" y="425" width="9" height="9"/> <rect x="663" y="425" width="9" height="9"/> <rect x="674" y="425" width="9" height="9"/> <rect x="685" y="425" width="9" height="9"/> <rect x="696" y="425" width="9" height="9"/> <rect x="707" y="425" width="9" height="9"/>
+  </g>
+  <text x="674" y="452" text-anchor="middle" font-size="12" fill="#7c2d12">8 × 8 INT8 MACs</text>
+  <text x="674" y="467" text-anchor="middle" font-size="11" fill="#9a3412">INT32 accumulators</text>
+  <g stroke="#e07a1f" stroke-width="1.2" marker-end="url(#arrow)">
+    <line x1="594" y1="390" x2="610" y2="390"/>
+    <line x1="736" y1="390" x2="752" y2="390"/>
+  </g>
+  <line x1="811" y1="206" x2="811" y2="278" stroke="#374151" stroke-width="1.6" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <text x="803" y="224" text-anchor="end" font-size="11" fill="#4b5563">port B</text>
+  <text x="803" y="238" text-anchor="end" font-size="11" fill="#4b5563">128-bit</text>
+</svg>
