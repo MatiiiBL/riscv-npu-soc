@@ -1,0 +1,140 @@
+# Continuous integration for Pulse (see docs/verification.md).
+#
+# Each job checks out the repository, installs only what it needs through
+# .github/actions/setup, and runs the same make targets as a local checkout.
+# Jobs for blocks that are not in the tree yet skip their steps with a notice.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iss:
+    name: ISS (${{ matrix.cxx }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup
+        with:
+          firmware: true
+      - name: Build the ISS (-Werror)
+        run: |
+          "$CXX" --version | head -n 1
+          make -j"$(nproc)" iss
+      - name: ISS unit tests
+        run: make -C tools/iss test
+      - name: riscv-tests on the ISS
+        run: make -j"$(nproc)" test-isa-iss
+      - name: Random difftest, ISS against itself
+        run: make -C verif/random -j"$(nproc)" SEEDS=100 LEN=2000 RTL_SIM=build/iss/iss
+      - name: difftest self-test
+        run: make -C verif/random selftest
+      - name: Keep failing cases
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: iss-${{ matrix.cxx }}-failures
+          path: |
+            build/random/fail/
+            build/riscv-tests/*.log
+          if-no-files-found: ignore
+
+  npu:
+    name: NPU (lint, cocotb)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          hdl: true
+          python: true
+      - name: Verilator lint of every RTL top
+        run: make lint
+      - name: cocotb tests of npu_top
+        run: make test-npu
+      - name: Keep test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: npu-results
+          path: build/npu/**/results.xml
+          if-no-files-found: ignore
+
+  # Tests that need the Verilator SoC model (sim/). Adding a target is one
+  # line in the matrix; until sim/Makefile exists every step is skipped.
+  rtl:
+    name: RTL (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [test-isa-rtl, test-sw, test-random]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Check for the SoC simulator
+        id: guard
+        run: |
+          if [ -f sim/Makefile ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::sim/Makefile is not in this tree yet, so ${{ matrix.target }} is skipped"
+          fi
+      - if: steps.guard.outputs.run == 'true'
+        uses: ./.github/actions/setup
+        with:
+          firmware: true
+          hdl: true
+      - name: make ${{ matrix.target }}
+        if: steps.guard.outputs.run == 'true'
+        run: make -j"$(nproc)" ${{ matrix.target }}
+      - name: Keep failing cases
+        if: failure() && steps.guard.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtl-${{ matrix.target }}-failures
+          path: |
+            build/random/fail/
+            build/riscv-tests/*.log
+            build/sw/*.out
+          if-no-files-found: ignore
+
+  synth:
+    name: Synthesis (Yosys, ECP5)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      # soc_top is synthesized with the hello firmware as its memory image
+      # (rtl/Makefile synth-check), so it needs the firmware toolchain too.
+      - uses: ./.github/actions/setup
+        with:
+          hdl: true
+          firmware: ${{ hashFiles('rtl/soc/soc.f') != '' }}
+      - name: npu_top
+        run: python3 .github/scripts/synth_report.py --top npu_top --filelist rtl/npu/npu.f
+      - name: soc_top
+        if: hashFiles('rtl/soc/soc.f') != ''
+        run: |
+          make -C rtl synth-check
+          python3 .github/scripts/synth_report.py --top soc_top --stat build/synth-check/stat.txt

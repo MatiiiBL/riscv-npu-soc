@@ -1,0 +1,67 @@
+name: Pulse toolchains
+description: >-
+  Installs the tools a Pulse CI job needs. Every part is optional, so a new
+  job only lists what it uses.
+
+inputs:
+  firmware:
+    description: RISC-V firmware toolchain (clang, lld, llvm from apt; clang 18 has the RISC-V target)
+    default: "false"
+  hdl:
+    description: Verilator and Yosys from the YosysHQ OSS CAD Suite
+    default: "false"
+  python:
+    description: .venv with requirements.txt (cocotb, numpy, pytest), cached
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Firmware toolchain
+      if: inputs.firmware == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends clang lld llvm
+        clang --version | head -n 1
+
+    # Python comes before the OSS CAD Suite so the venv is built on the
+    # runner's interpreter. The suite only adds its own Python to PATH when
+    # asked to (python-override), which these jobs never do.
+    - name: Python
+      if: inputs.python == 'true'
+      id: python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+
+    - name: Restore .venv
+      if: inputs.python == 'true'
+      id: venv
+      uses: actions/cache@v6
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}
+
+    - name: Create .venv
+      if: inputs.python == 'true' && steps.venv.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        "${{ steps.python.outputs.python-path }}" -m venv .venv
+        .venv/bin/pip install -q -r requirements.txt
+
+    # Pinned so a new suite release cannot change results under us. Ubuntu's
+    # own Verilator is too old for cocotb 2.1 (needs 5.036 or later).
+    - name: OSS CAD Suite
+      if: inputs.hdl == 'true'
+      uses: YosysHQ/setup-oss-cad-suite@v4
+      with:
+        version: "2026-11-01"
+        github-token: ${{ github.token }}
+
+    - name: HDL tool versions
+      if: inputs.hdl == 'true'
+      shell: bash
+      run: |
+        verilator --version
+        yosys -V
