@@ -66,8 +66,8 @@ module rv32_core #(
 
   // Pipeline control, produced further down.
   logic        stall_d;        // hold IF and ID
-  logic        lu_hazard;      // load in EX feeds the instruction in ID
-  logic        mu_hazard;      // multiply in EX feeds the instruction in ID
+  logic        data_hazard;    // ID reads a register a load or multiply has not produced yet
+  logic        lu_hazard;      // ... a load: counted in perf_load_use
   logic        div_stall;      // divide in EX not finished: hold IF, ID, EX
   logic        redirect_x;     // EX found a misprediction
   logic [31:0] redirect_pc_x;
@@ -263,22 +263,41 @@ module rv32_core #(
   //    instruction in between).
   // A divide sitting in EX is neither, so these and div_stall are mutually
   // exclusive.
-  logic is_mul_x, rd_match_x, rd_match_m;
+  //
+  // The registers those instructions will write are kept as one-hot masks,
+  // built when they leave ID and qualified with valid_x / valid_m, so the
+  // check here is a lookup of rs1 and rs2 in a mask that comes entirely from
+  // flip-flops. Comparing rs1/rs2 with rd_x and rd_m instead puts a chain of
+  // comparisons behind the decode of the IMEM output, on the path to the
+  // stall, which every IF/ID register and pc_f depend on.
+  logic        is_mul_d, is_mul_x;
+  logic [31:0] rd_oh_d;                  // one-hot rd of the instruction in ID
+  logic [31:0] ld_x_q, mul_x_q, ld_m_q;  // rd of a load / multiply in EX, of a load in MEM
+  logic [31:0] pend_ld, pend;            // registers not yet available to EX
 
-  assign is_mul_x   = (res_sel_x == rv32_pkg::RES_MUL);
-  assign rd_match_x = valid_x && rd_we_x && valid_d &&
-                      ((uses_rs1_d && rs1_d == rd_x) || (uses_rs2_d && rs2_d == rd_x));
-  assign rd_match_m = valid_m && rd_we_m && valid_d &&
-                      ((uses_rs1_d && rs1_d == rd_m) || (uses_rs2_d && rs2_d == rd_m));
-  assign lu_hazard  = (rd_match_x && is_load_x) || (rd_match_m && is_load_m);
-  assign mu_hazard  = rd_match_x && is_mul_x;
-  assign stall_d    = lu_hazard || mu_hazard || div_stall;
+  assign is_mul_d = (res_sel_d == rv32_pkg::RES_MUL);
+  assign is_mul_x = (res_sel_x == rv32_pkg::RES_MUL);
+  assign rd_oh_d  = rd_we_d ? (32'd1 << rd_d) : '0;
+
+  always_ff @(posedge clk) begin
+    if (!div_stall) begin
+      ld_x_q  <= is_load_d ? rd_oh_d : '0;
+      mul_x_q <= is_mul_d  ? rd_oh_d : '0;
+    end
+    ld_m_q <= ld_x_q;
+  end
+
+  assign pend_ld   = ({32{valid_x}} & ld_x_q) | ({32{valid_m}} & ld_m_q);
+  assign pend      = pend_ld | ({32{valid_x}} & mul_x_q);
+  assign data_hazard = valid_d && ((uses_rs1_d && pend[rs1_d]) || (uses_rs2_d && pend[rs2_d]));
+  assign lu_hazard   = valid_d && ((uses_rs1_d && pend_ld[rs1_d]) || (uses_rs2_d && pend_ld[rs2_d]));
+  assign stall_d     = data_hazard || div_stall;
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       valid_x <= 1'b0;
     end else if (!div_stall) begin
-      valid_x <= valid_d && !lu_hazard && !mu_hazard && !redirect_x && !halt_x;
+      valid_x <= valid_d && !data_hazard && !redirect_x && !halt_x;
     end
   end
 
