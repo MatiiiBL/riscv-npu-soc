@@ -105,6 +105,12 @@ jobs:
               make -j"$(nproc)" -C verif/riscv-tests run-rtl RTL_SIM="$PWD/build/sim/soc_sim_bp0"
           - name: directed core tests
             run: make -j"$(nproc)" test-core
+          - name: predictor builds compared
+            run: make -j"$(nproc)" -C verif/core bp-compare
+          - name: random initial state
+            run: make -j"$(nproc)" -C verif/core randreset
+          - name: serial UART
+            run: make -j"$(nproc)" -C verif/core uart-serial
           - name: firmware
             run: make -j"$(nproc)" test-sw
           - name: firmware, NPU_DMA_BYTES=4

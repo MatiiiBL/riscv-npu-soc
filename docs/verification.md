@@ -6,7 +6,8 @@ has to slip past more than one independent check to reach the board:
 | Level | What runs | Checked against | Location | Command |
 |-------|-----------|-----------------|----------|---------|
 | ISA compliance | riscv-tests `rv32ui` + `rv32um` (48 tests) | self-checking tests | `verif/riscv-tests/` | `make test-isa` |
-| Core, directed | short pipeline-hazard programs | ISS + the cycle costs of spec section 6 | `verif/core/` | `make test-core` |
+| Core, directed | short pipeline-hazard programs | their own constants, the ISS through difftest, `--stats` counters, the cycle costs of spec section 6 | `verif/core/` | `make test-core` |
+| Simulator variants | both predictor builds, random initial state, the real serial UART | each other, and the riscv-tests and firmware checks | `verif/core/` | `make test-variants` |
 | Core, random | constrained-random RV32IM programs | ISS, commit log line by line | `verif/random/`, `tools/rvgen/`, `tools/difftest.py` | `make test-random` |
 | NPU unit | cocotb tests of `npu_top` | Python golden model | `verif/npu/` | `make test-npu` |
 | Firmware | C tests, including NPU driver tests | `expected.txt`, on both simulators | `sw/tests/` | `make test-sw` |
@@ -82,13 +83,46 @@ disassembly in `build/riscv-tests/<test>.dis`.
 ## 3. Directed core tests
 
 The random tests find hazards statistically. The directed tests in
-`verif/core/` hit each one on purpose and also check the performance claims of
-spec section 6, which a functional comparison cannot see: a load-use pair
-costs exactly one bubble, a mispredicted branch two, a correctly predicted
-taken branch none, and a divide stalls for the divider latency. Each program
-runs through `difftest.py` against the ISS for its results, and through
-`soc_sim --stats` for the performance counters (load-use stalls, mispredicts,
-divider stall cycles) and the cycle count.
+`verif/core/` (`make test-core`; `docs/core.md` section 8 lists them) hit each
+one on purpose: forwarding from every stage into every operand, load-use into
+every kind of consumer, dependent divides and the M-extension corner cases,
+x0 under forwarding, branch-predictor training, squashing of wrong-path
+instructions, call/return chains, `instret`, SoC address decoding, and every
+way to halt, bad fetches included. Each program checks its own results
+against constants and reports through `SIM_EXIT`. On both predictor builds,
+`verif/core/check.sh` also requires of every run:
+
+- the expected exit code and UART output, and a commit log of exactly
+  `instret` lines;
+- the same commit log, stdout and exit code from the ISS through
+  `tools/difftest.py`, for every test that does not read `cycle` (all but
+  `csr.S` and `timing.S`);
+- consistent `soc_sim --stats` counters (cycles at least instret, no more
+  mispredicts than branches) and, above zero, the counter the test exists to
+  exercise: load-use stalls for `loaduse.S`, mispredicts for `bpred.S` and
+  `calls.S`, divider stall cycles for `muldiv.S`.
+
+`timing.S` measures the costs of spec section 6 cycle-exactly with two
+`rdcycle` reads around each case, once per predictor mode: one bubble per
+load-use pair, two per mispredicted branch, none for a correctly predicted
+taken branch, and 34 cycles in EX for a divide. `make test-core` finally runs
+`verif/core/sim_cli.py`, which requires `soc_sim` and the ISS to accept and
+reject the same command lines and malformed ELF files with the same exit
+codes (spec 7.1).
+
+`make test-variants` checks the simulator builds whose behavior must not
+differ from the default one:
+
+- `bp-compare`: `soc_sim` and `soc_sim_bp0` must give identical commit logs
+  for every directed test, riscv-test and firmware test. Programs that read
+  `cycle` or poll the NPU's `BUSY` flag retire a timing-dependent number of
+  instructions, so for them only the output and exit code must match.
+- `randreset`: a build whose unreset flops and memories start random
+  (`--x-initial unique`) runs the riscv-tests and the firmware tests for
+  three seeds, so nothing may depend on state that reset does not set.
+- `uart-serial`: a build with the real UART (`SIM = 0`) must deliver every
+  firmware test's output intact over the serial line, and `hello` must have
+  found the transmitter busy, so the backpressure path is exercised.
 
 ## 4. Random differential testing
 
@@ -307,10 +341,10 @@ mini libc, the NPU driver). Firmware that does neither can also go through
 
 | Job | Runs |
 |-----|------|
-| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make -C tools/iss test`, `make test-isa-iss`, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`), 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
-| `NPU (lint, cocotb)` | `make lint` for every RTL top in the tree, `make test-npu` |
-| `RTL (<test>)` | `make test-isa-rtl`, `make -C verif/core`, `make test-sw` and `make test-random` against the Verilator SoC model; each is skipped with a notice while the files it needs (`sim/Makefile`, `verif/core/Makefile`) are absent |
-| `Synthesis (Yosys, ECP5)` | `synth_ecp5` of `npu_top` (and of `soc_top` through `make -C rtl synth-check` once `rtl/soc/soc.f` exists), with the cell counts in the job summary |
+| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make test-iss`, `make test-isa-iss`, a check that the riscv-tests refuse to run without their submodule, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`), `make test-sw-arr`, 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
+| `NPU (lint, cocotb)` | `make lint` for every RTL top, `make test-npu` |
+| `RTL (<test>)` | one job each, in parallel: `make test-isa-rtl`, the riscv-tests on `soc_sim_bp0`, `make test-core`, `bp-compare`, `randreset`, `uart-serial`, `make test-sw`, the firmware tests on `soc_sim_dma4`, `make test-random`, and the random difftest on `soc_sim_bp0` |
+| `Synthesis (Yosys, ECP5)` | `synth_ecp5` of `npu_top` and `soc_top` with the cell counts in the job summary, then the ULX3S place and route, timing report and bitstream |
 
 The firmware toolchain is Ubuntu's `clang`, `lld` and `llvm` (clang 18 has
 the RISC-V target, and `mk/toolchain.mk` uses the plain tool names when there

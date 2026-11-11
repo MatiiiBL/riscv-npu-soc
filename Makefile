@@ -4,8 +4,8 @@
 include mk/toolchain.mk
 
 .PHONY: all sim iss sw riscv-tests lint venv \
-        test test-iss test-isa test-isa-iss test-isa-rtl test-core test-npu \
-        test-sw test-sw-arr test-random bench synth clean
+        test test-iss test-isa test-isa-iss test-isa-rtl test-core test-variants \
+        test-npu test-sw test-sw-arr test-random bench synth clean
 
 all: sim iss sw riscv-tests
 
@@ -44,6 +44,12 @@ test-isa: test-isa-iss test-isa-rtl
 test-core:
 	$(MAKE) -C verif/core
 
+# Simulator variants that must not change behavior: the two predictor builds
+# give identical commit logs, a build that starts from random state passes the
+# suites, and the real serial UART delivers the firmware output intact.
+test-variants:
+	$(MAKE) -C verif/core bp-compare randreset uart-serial
+
 test-npu:
 	$(MAKE) -C verif/npu
 
@@ -68,7 +74,7 @@ test-sw-arr: iss sw
 test-random: sim iss
 	$(MAKE) -C verif/random
 
-test: lint test-iss test-isa test-core test-npu test-sw test-sw-arr test-random
+test: lint test-iss test-isa test-core test-variants test-npu test-sw test-sw-arr test-random
 
 bench: sim sw
 	$(MAKE) -C sw bench
