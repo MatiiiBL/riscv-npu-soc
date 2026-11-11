@@ -17,8 +17,8 @@ bug. Change the document in the same commit as the behavior.
                  |  |  5-stage pipe    |-------------->|           |---------->|          | |
                  |  |  BTB + BHT       |               |  address  |           |   DMEM   | |
                  |  +------------------+               |  decoder  |           |  256 KiB | |
-                 |          | RVFI-style retire port   |           |           |  (dual   | |
-                 |          v                          |           |           |   port)  | |
+                 |          | RVFI-style retire port   |           |           | (banked, | |
+                 |          v                          |           |           |  2-port) | |
                  |    commit log (sim)                 |           |---+       |          | |
                  |                                     +-----------+   |       +----------+ |
                  |                                       |     |       |  cfg        ^ port B|
@@ -38,8 +38,11 @@ bug. Change the document in the same commit as the behavior.
   processing elements with INT32 accumulators, local operand buffers, a DMA
   engine on the second DMEM port and a fused bias / requantize / ReLU
   write-back stage. Software drives it through memory-mapped registers.
-- **Memories:** Harvard. IMEM is fetch-only. DMEM is a true dual-port RAM so
-  the NPU streams operands without stealing CPU cycles.
+- **Memories:** Harvard. IMEM is fetch-only. DMEM is built from
+  word-interleaved true dual-port RAM banks: port A gives the CPU ordinary
+  32-bit access and port B gives the NPU one aligned `NPU_DMA_BYTES` block
+  (16 bytes by default) per cycle, so the NPU streams operands without
+  stealing CPU cycles (section 4.5).
 - **Reference model:** `tools/iss` is a C++ instruction-set simulator of the
   whole SoC (core, memory map, UART, exit register and a functional model of
   the NPU). It is the golden model for the RTL.
@@ -69,7 +72,7 @@ bug. Change the document in the same commit as the behavior.
 | Base          | Size    | Region | Notes |
 |---------------|---------|--------|-------|
 | `0x0000_0000` | 64 KiB  | IMEM   | instruction fetch only. Reset PC = `0x0000_0000`. |
-| `0x1000_0000` | 256 KiB | DMEM   | CPU loads/stores (port A) and NPU DMA (port B). Stack at the top. |
+| `0x1000_0000` | 256 KiB | DMEM   | CPU loads/stores (port A, 32-bit) and NPU DMA (port B, `NPU_DMA_BYTES` wide). Stack at the top. |
 | `0x2000_0000` | 4 KiB   | MMIO   | peripherals, table below. |
 | `0x3000_0000` | 4 KiB   | NPU    | NPU registers, section 5. |
 
@@ -172,13 +175,33 @@ module npu_top #(
 ```
 
 Every DMA access is one aligned block of `DMA_BYTES` bytes (little-endian:
-byte `dma_addr + i` is `dma_wdata[8i +: 8]`). The SoC maps `dma_addr` into
-DMEM as block `(dma_addr - 0x1000_0000) / DMA_BYTES`; with `DMA_BYTES > 4`
-DMEM is banked by word address, so one block reads `DMA_BYTES / 4` 32-bit
-banks in parallel. DMA accesses outside DMEM read 0 and drop writes. The
-register interface does not depend on `DMA_BYTES`: operand addresses and
-strides only need to be 4-byte aligned, and the NPU fetches the aligned
-blocks that cover each row. The default (4) matches a 32-bit DMEM port.
+byte `dma_addr + i` is `dma_wdata[8i +: 8]`). The register interface does not
+depend on `DMA_BYTES`: operand addresses and strides only need to be 4-byte
+aligned, and the NPU fetches the aligned blocks that cover each row. The
+module default (4) matches an unbanked 32-bit DMEM port.
+
+### 4.5 DMEM ports
+
+`soc_top` has `parameter int NPU_DMA_BYTES = 16` (legal: 4, 8, 16) and
+instantiates `npu_top` with `DMA_BYTES = NPU_DMA_BYTES`. DMEM is built from
+`BANKS = NPU_DMA_BYTES / 4` word-interleaved banks, each a true dual-port
+32-bit RAM with byte enables: DMEM word `w` (byte offset `4w` from
+`0x1000_0000`) is held by bank `w mod BANKS` at row `w / BANKS`.
+
+- **Port A (CPU, 32 bits)** decodes as in section 4.2. The bank is selected
+  by byte-address bits `[3:2]` for 16 bytes (`[2]` for 8; a single bank for
+  4) and only that bank is enabled; the bank number is registered with the
+  request and steers the read data in the next cycle. Banking is invisible
+  to software.
+- **Port B (NPU, `8 * NPU_DMA_BYTES` bits)** maps `dma_addr` to block
+  `(dma_addr - 0x1000_0000) / NPU_DMA_BYTES`, which is the same row of every
+  bank: all banks are read or written in parallel, word `i` of the block is
+  bank `i`, and `dma_be` lane `i` enables byte `dma_addr + i`. DMA accesses
+  outside DMEM read 0 and drop writes.
+
+Both ports keep one cycle of read latency and never stall. The same total
+256 KiB is stored for any `NPU_DMA_BYTES`, so the bank count does not change
+the amount of block RAM.
 
 ## 5. NPU programming model
 

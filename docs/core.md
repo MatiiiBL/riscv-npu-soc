@@ -16,6 +16,7 @@ says *what* the hardware must do; this file explains *how* and *why*.
 | `rtl/core/rv32_core.sv` | the five pipeline stages, hazards, CSRs, counters, retire port |
 | `rtl/soc/soc_top.sv` | core + IMEM + DMEM + decoder + MMIO + NPU |
 | `rtl/soc/bram_sp.sv`, `bram_tdp.sv` | inferable single-port ROM and true dual-port RAM |
+| `rtl/soc/soc_dmem.sv` | DMEM: word-interleaved `bram_tdp` banks, 32-bit CPU port, wide NPU port |
 | `rtl/soc/soc_bus.sv` | address decoder for the CPU data port and the NPU DMA port |
 | `rtl/soc/soc_mmio.sv`, `uart_tx.sv` | UART, SIM_EXIT, LEDS |
 | `rtl/npu/` | `npu_top`, the systolic-array accelerator (see `docs/npu.md`) |
@@ -284,22 +285,50 @@ latency, output held while `en` (`imem_req`) is low. Contents come from
 `IMEM_INIT` (`$readmemh`, used for the bitstream) or, in simulation, from
 the harness's ELF loader.
 
-**DMEM** (`bram_tdp`): 64 K x 32 true dual-port RAM with byte enables; port
-A serves the CPU and port B the NPU DMA. The array carries Yosys's
-`no_rw_check` attribute: the hardware gives no guarantee when both ports
-touch the same word in one cycle, the software contract never relies on
-one, and without the attribute Yosys would emulate Verilog's cross-port
-read-old-data semantics in logic instead of using block RAM. `DMEM_INIT`
-initialises it for the FPGA. `tools/elf2hex.py` turns an ELF into both
-images.
+**DMEM** (`soc_dmem`): 64 K x 32 words in `BANKS = NPU_DMA_BYTES / 4`
+word-interleaved banks (4 by default), each a `bram_tdp` true dual-port RAM
+with byte enables. Word `w` lives in bank `w mod BANKS` at row `w / BANKS`.
+
+```
+  NPU_DMA_BYTES = 16:
+  CPU (port A)   byte address [17:4] = row, [3:2] = bank
+  NPU (port B)   byte address [17:4] = row, all four banks
+
+             bank 0      bank 1      bank 2      bank 3
+  row r    word 4r     word 4r+1   word 4r+2   word 4r+3
+             |           |           |           |
+  port B   [31:0]      [63:32]     [95:64]     [127:96]   one 16-byte block per cycle
+  port A   only the addressed bank is enabled; its number, registered with the
+           request, selects which bank's output is the CPU read data next cycle
+```
+
+Port A is the CPU's: it enables just the bank that holds the word and
+registers the bank number, because the banks answer a cycle later; in that
+cycle the registered number picks the read data, the same way `soc_bus`
+picks DMEM over MMIO. Port B is the NPU's: an aligned block is one row
+across all banks, so every bank is read or written in parallel and the NPU
+moves `NPU_DMA_BYTES` bytes per cycle. Neither port stalls and both keep one
+cycle of latency, so the CPU sees exactly the memory it saw before banking:
+commit logs and cycle counts of every CPU-only program are identical to the
+unbanked design. The banks add up to the same 256 KiB for every width, so
+DMEM is 128 `DP16KD` block RAMs with 1, 2 or 4 banks.
+
+Each array carries Yosys's `no_rw_check` attribute: the hardware gives no
+guarantee when both ports touch the same word in one cycle, the software
+contract never relies on one, and without the attribute Yosys would emulate
+Verilog's cross-port read-old-data semantics in logic instead of using block
+RAM. For the FPGA, `DMEM_INIT` is a path prefix and bank `b` loads
+`<DMEM_INIT><b>.hex`; `tools/elf2hex.py --dmem PREFIX --dmem-banks N` writes
+those files (and `--imem` the IMEM image).
 
 **Decoder** (`soc_bus`): the CPU request goes to DMEM when the address is in
 `0x1000_0000-0x1003_FFFF`, to MMIO in `0x2000_0000-0x2000_0FFF` and to the
 NPU in `0x3000_0000-0x3000_0FFF`; anything else, including IMEM addresses
 and the space past each region, reads 0 and drops writes, with no aliasing.
 The selected source is registered and steers the read data in the next
-cycle, when the slave answers. DMA addresses map onto DMEM port B the same
-way (`(addr - 0x1000_0000) >> 2`); out-of-range DMA reads return 0.
+cycle, when the slave answers. DMA addresses map onto DMEM port B as block
+`(addr - 0x1000_0000) / NPU_DMA_BYTES`, with the same DMEM range check;
+out-of-range DMA reads return 0 and writes are dropped.
 
 **MMIO** (`soc_mmio`): `UART_TX`, `UART_STATUS`, `SIM_EXIT`, `LEDS`, decoded
 by word offset; undefined offsets and the write-only registers read 0, and
@@ -310,18 +339,23 @@ harness takes bytes and the exit value from the write strobes
 (`sim_uart_*`, `sim_exit_*`).
 
 **NPU**: `soc_top` instantiates `npu_top` (`rtl/npu/`, pulled in by
-`soc.f` through `-F ../npu/npu.f`); its register port hangs off the decoder
-and its DMA master owns DMEM port B, so NPU traffic never stalls the core.
+`soc.f` through `-F ../npu/npu.f`) with `DMA_BYTES = NPU_DMA_BYTES`; its
+register port hangs off the decoder and its DMA master owns DMEM port B, so
+NPU traffic never stalls the core.
 
 ## 7. Simulator
 
-`sim/` builds `build/sim/soc_sim` (and `soc_sim_bp0` with
-`make -C sim BP_MODE=0`) with `-O3 --x-assign fast --x-initial fast`;
-tracing is compiled in and only enabled by `--vcd`. The ELF loader in
-`sim/elf_loader.cpp` copies the `PT_LOAD` segments by physical address into
-zero-filled IMEM and DMEM images and writes them into the model's memory
-arrays, which `sim/sim.vlt` keeps public for that purpose. The register file
-starts at zero, like the ISS's.
+`sim/` builds `build/sim/soc_sim` with `-O3 --x-assign fast --x-initial
+fast`; `make -C sim BP_MODE=0` builds `soc_sim_bp0` (static prediction) and
+`make -C sim NPU_DMA_BYTES=4` (or 8) builds `soc_sim_dma4` with a narrower
+NPU port, and the two knobs combine. Tracing is compiled in and only enabled
+by `--vcd`. The ELF loader in `sim/elf_loader.cpp` copies the `PT_LOAD`
+segments by physical address into zero-filled IMEM and DMEM images, and the
+harness writes them into the model's memory arrays, which `sim/sim.vlt`
+keeps public. It finds them through Verilator's scope table by instance
+name, counting the DMEM banks the model was built with, so the same harness
+works for every `NPU_DMA_BYTES`. The register file starts at zero, like the
+ISS's.
 
 Each loop iteration observes one settled cycle and then clocks the model.
 Within a cycle the retirement port (the WB instruction) is handled before
@@ -379,8 +413,8 @@ CPI (`soc_sim --stats`); cycles include the 4-cycle pipeline fill:
 | Program | `BP_MODE = 1` cycles / CPI | `BP_MODE = 0` cycles / CPI | Notes |
 |---------|---------------------------|----------------------------|-------|
 | `sw/bench/coremark` | 3075804 / 1.167 | 3657306 / 1.388 | 3.29 vs 2.77 CoreMark/MHz; 9.7% vs 58.8% of branches mispredicted |
-| `sw/bench/gemm` (CPU parts) | 13243977 / 1.015 | 14490115 / 1.116 | |
-| `sw/tests/hello` | 825 / 1.230 | 915 / 1.364 | 671 instructions, 98 load-use bubbles; 27 vs 72 mispredicts |
+| `sw/bench/gemm` | 13093309 / 1.012 | 14339620 / 1.111 | whole run, software and NPU GEMMs |
+| `sw/tests/hello` | 1430 / 1.470 | 1708 / 1.755 | 973 instructions, 189 load-use bubbles, 198 divider stall cycles; 34 vs 173 mispredicts |
 | `verif/core/calls` | 27480 / 1.198 | 32960 / 1.437 | recursive fib(15), returns to varying call sites |
 | `verif/core/bpred` | 4091 / 1.179 | 5051 / 1.455 | loop and pattern branches |
 | `rv32ui-p-add` | 526 / 1.143 | 496 / 1.078 | see below |
@@ -393,19 +427,31 @@ taken once (a miss in both modes) and then falls through, which the freshly
 allocated, weakly-taken entry mispredicts. Loop-heavy code such as `hello`,
 `calls` and `bpred` shows the benefit.
 
-Yosys `synth_ecp5` of `soc_top` with the `hello` image
-(`make -C rtl synth-check`):
+Yosys `synth_ecp5` of `soc_top`, NPU included, with the `hello` image
+(`make -C rtl synth-check NPU_DMA_BYTES=4` and the default 16):
 
-| Resource | Count | Notes |
-|----------|-------|-------|
-| LUT4 | 4380 | about 5% of an ECP5-85F |
-| TRELLIS_FF | 1577 | |
-| CCU2C | 400 | carry chains |
-| DP16KD | 159 | 128 DMEM, 29 IMEM, 2 BTB |
-| TRELLIS_DPR16X4 | 36 | register file (16 per read port), BTB counters (4) |
-| MULT18X18D | 4 | multiplier |
+| Resource | `NPU_DMA_BYTES = 4` | `= 16` | Notes |
+|----------|-------------------:|-------:|-------|
+| LUT4 | 10132 | 10656 | 12.7% of an ECP5-85F at 16 |
+| CCU2C | 1693 | 1720 | carry chains |
+| TRELLIS_FF | 7188 | 7190 | |
+| DP16KD | 167 | 175 | DMEM 128 in both, IMEM 29, BTB 2, NPU operand buffers 8 / 16 |
+| TRELLIS_DPR16X4 | 36 | 36 | register file (16 per read port), BTB counters (4) |
+| MULT18X18D | 70 | 70 | 4 in the core's multiplier, 66 in the NPU |
 
-IMEM is built from 32 one-bit-wide RAM columns; Yosys drops the columns
-whose bit is constant across the whole image (3 for `hello`), so a full
-program uses 32. The core alone (`rv32_core`) is 3246 LUT4 and 1115
-flip-flops.
+Banking leaves DMEM at 128 block RAMs; the extra block RAMs and most of the
+extra LUTs at 16 bytes are the NPU's wider operand buffers and datapath
+(`docs/npu.md`). IMEM is built from 32 one-bit-wide RAM columns; Yosys drops
+the columns whose bit is constant across the whole image (3 for `hello`),
+so a full program uses 32. The core alone (`rv32_core`) is 3246 LUT4 and
+1115 flip-flops.
+
+What the 16-byte port buys (`soc_sim` vs `soc_sim_dma4`, `sw/bench`):
+
+| Benchmark | `NPU_DMA_BYTES = 4` | `= 16` |
+|-----------|--------------------:|-------:|
+| MNIST, NPU cycles per inference | 5680 (61.9x software) | 3015 (116.5x) |
+| GEMM 64 x 64 x 256, NPU cycles | 65213 (56.1x) | 38141 (96.0x) |
+| GEMM 16 x 16 x 2048, NPU cycles | 42135 (42.2x) | 17687 (100.5x) |
+| GEMM 8 x 8 x 64, NPU cycles | 665 (23.9x) | 489 (32.5x) |
+| CoreMark | 3.29 / MHz | 3.29 / MHz (identical cycles) |
