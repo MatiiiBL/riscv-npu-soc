@@ -376,15 +376,25 @@ cross-boundary optimization):
 Every pipeline stage is register to register through at most one of: an
 8 x 8 or 17 x 16 DSP multiply, a 32-bit carry chain, the 64:1 mux, a 48-bit
 three-input add, the 48-bit barrel shift, or the lane rotation feeding a
-buffer RAM write port. Fmax has not been measured: there is no
-place-and-route in this flow yet (`fpga/` will add nextpnr).
+buffer RAM write port.
+
+**Fmax.** Placed and routed on its own (nextpnr-ecp5, LFE5U-85F speed grade
+6, `DMA_BYTES = 16`, every port behind a flip-flop), the NPU reaches 73.30
+and 76.55 MHz with seeds 1 and 2. Its critical path, 13.1-13.6 ns, ends at
+the DMA's remaining-length register (`rem_q` in `npu_dma.sv`), which START
+loads from the operand address and `K` registers: the START decode, not the
+datapath. In the SoC the core sets the clock (26-28 MHz today), so the NPU
+has about 2.7x of slack; [fpga.md](fpga.md) section 8 has the full analysis.
 
 ## 7. Verification
 
 `make -C verif/npu` (or `make test-npu`) builds `npu_top` with Verilator in
-four configurations, `ARR:DMA_BYTES` = 8:4, 8:8, 8:16 and 4:16, and runs the
-cocotb suite on each; it exits nonzero if any test fails. Options:
-`CONFIGS="8:16"`, `SEED=n`, `OPS=n`, `TEST=test_name`, `make waves`.
+six configurations, `ARR:DMA_BYTES[:KMAX]` = 8:4, 8:8, 8:16 and 4:16 at
+`KMAX = 1024` plus two corners, 3:4:16 (an `ARR` that is not a power of two)
+and 1:16:16 (one PE, the widest port), and runs the cocotb suite on each; it
+exits nonzero if any test fails. A clean build and run takes about 35 s.
+Options: `CONFIGS="8:16"` or `CONFIGS="5:8:37"`, `SEED=n`, `OPS=n`,
+`TEST=test_name`, `make waves`.
 
 - `npu_model.py` is the golden model, written straight from the spec 5.1
   pseudocode (numpy for the dot products, Python integers for the
@@ -421,14 +431,20 @@ cocotb suite on each; it exits nonzero if any test fails. Options:
 | `test_errors` | every invalid parameter: `ERR\|DONE`, no memory traffic, accumulators kept |
 | `test_busy_writes` | writes (`START` included) during LOAD, COMPUTE and WB are ignored |
 | `test_int8_byte_enables` | partial INT8 words for every `N`, padded strides; enables limited to one 32-bit lane |
-| `test_random_regression` | 300 seeded random operations mixing all of the above, including random operand reuse (30 to 41 kept loads of each operand per run) |
+| `test_random_regression` | 300 seeded random operations mixing all of the above, including random operand reuse (24 to 41 kept loads of each operand per run) |
 | `test_cycles` | the measurements in section 6 |
 
-The suite has also been run for `ARR:DMA_BYTES` = 1:16, 2:8, 3:8, 5:4,
-5:16 and 16:16 with `KMAX` = 16, 8, 64, 37, 37 and 64 (so `KMAX` is not a
-multiple of the block size), and the random regression for 1500 operations
-on several seeds. As a check on the checks, single-line bugs were injected
-into the RTL and the suite failed on each: ten in the original datapath
+The whole suite also passes (19/19) for `ARR:DMA_BYTES:KMAX` = 1:4:16,
+2:8:8, 3:8:64, 5:4:37, 5:16:37, 5:8:7, 16:16:64, 8:16:2 and 8:4:1, so for
+`KMAX` down to 1 and not a multiple of the block size; every operation a
+test builds must fit the configuration (`run_op` asserts it), so a corner
+cannot pass by turning its operations into rejected ones. Verilator lint is
+clean for `ARR` = 1, 2, 3, 5, 8, 16 and 32, `KMAX` from 1 to 65535 and every
+`DMA_BYTES`, and the random regression has run for 1500 operations on
+several seeds in all six default configurations.
+
+As a check on the checks, single-line bugs were injected into the RTL and
+the suite failed on each: ten in the original datapath
 (rounding constant, row gating, drain length, byte enables, busy writes,
 saturation threshold, accumulator clear, bias fetch, ReLU, `ACC_KEEP`), six
 in the wide port (lane index wrap, lane rotation, group skew, write lane,
@@ -463,7 +479,10 @@ that is never read.
   rotate the values back into place, so it is not clearly cheaper.
 - **One output tile per command.** `M, N <= ARR`; software tiles larger
   matrices and splits `K > KMAX` with `ACC_KEEP` / `NO_WB`.
-- **Fmax** is unmeasured until the FPGA flow runs place-and-route. The first
-  stages to pipeline further if needed are the accumulator mux (S1), the
-  START decode with the reuse comparison, and the lane rotation in front of
+- **Fmax** is about 73-77 MHz for the NPU alone (section 6), well above the
+  core's 26-28 MHz, so it does not limit the SoC today. If the core gets
+  faster, the first stage to pipeline is the one on the critical path: the
+  DMA's first-row setup (`rem_q` and the block address) in the START cycle,
+  which can move one cycle later at the cost of one LOAD cycle. The next
+  candidates are the accumulator mux (S1) and the lane rotation in front of
   the buffer RAMs.

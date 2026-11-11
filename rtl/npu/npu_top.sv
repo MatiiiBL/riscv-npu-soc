@@ -14,7 +14,8 @@
 //   finish   BUSY drops, DONE and irq rise
 // Rejected parameters finish immediately with ERR and touch no memory.
 //
-// ARR must be 1..255 and KMAX 1..65535 so they fit the INFO fields.
+// ARR must be 1..255 and KMAX 1..65535 so they fit the INFO fields; the sizes
+// that are linted and simulated are listed in docs/npu.md section 7.
 // DMA_BYTES is the DMA port width in bytes: 4, 8 or 16.
 module npu_top #(
   parameter int ARR       = 8,
