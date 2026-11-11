@@ -16,6 +16,10 @@
 # <test>.<sim>.{out,err,commit} and <test>.<sim>.difftest/.
 set -u
 
+# The longest directed test needs about 30 k cycles; the bound turns a hang
+# into a quick exit-124 failure with a small commit log.
+MAX_CYCLES=1000000
+
 sim=$1
 elf=$2
 want=$3
@@ -57,7 +61,7 @@ check_stats() {
     done
 }
 
-"$sim" --stats --commit-log "$base.commit" "$elf" > "$base.out" 2> "$base.err"
+"$sim" --stats --max-cycles $MAX_CYCLES --commit-log "$base.commit" "$elf" > "$base.out" 2> "$base.err"
 got=$?
 
 reason=""
@@ -78,7 +82,8 @@ else
 fi
 if [ -z "$reason" ] && [ "$iss" != "-" ]; then
     if ! "${PYTHON:-python3}" "$repo/tools/difftest.py" -q --rtl "$sim" --iss "$iss" \
-            --expect-exit "$want" --work-dir "$base.difftest" "$elf" > "$base.difftest.txt" 2>&1; then
+            --max-cycles $MAX_CYCLES --expect-exit "$want" --work-dir "$base.difftest" \
+            "$elf" > "$base.difftest.txt" 2>&1; then
         reason="differs from the ISS (see $base.difftest.txt)"
     fi
 fi
