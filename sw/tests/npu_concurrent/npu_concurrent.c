@@ -3,8 +3,8 @@
  * so the CPU may keep working during a command as long as it stays off
  * every DMEM word the NPU reads or writes (docs/spec.md section 5). The
  * driver never does this (it polls STATUS until DONE), so this test starts
- * each command by hand, as in spec section 5.2, then runs a fixed CPU
- * workload of word, halfword and byte loads and stores before it polls.
+ * each command by hand, as in spec section 5.2, then runs a CPU workload of
+ * word, halfword and byte loads and stores before it polls.
  *
  * The NPU's buffers and the CPU's sit interleaved in one struct, so the
  * CPU's accesses land in the DMA blocks right next to the NPU's, in every
@@ -13,27 +13,30 @@
  * the bias must be unchanged, and the CPU's data must equal the same
  * workload run again with the NPU idle.
  *
- * The workload is the same whatever the NPU's timing, so the ISS (which runs
- * a command instantly) prints the same text. Where the NPU takes time
- * (CYCLES != 0, i.e. on the RTL), the test also checks that it was still
- * busy after the first slice of the workload and done by the end, i.e.
- * that the CPU traffic overlapped the whole command.
+ * The workload must outlast the command on any core, however fast, so it is
+ * sized in retired instructions rather than time: it runs slices until it
+ * has retired more instructions than an upper bound on the command's length
+ * in NPU cycles. A core retires at most one instruction per cycle, so the
+ * NPU is done by the end whatever the core's CPI. Instruction counts are
+ * the same on every core configuration and on the ISS, so the program's
+ * instruction stream is too. Where the NPU takes time (CYCLES != 0, i.e. on
+ * the RTL), the test checks that the NPU was busy right after START and
+ * done when the workload ended: the CPU traffic overlapped the whole command.
  */
 #include "npu.h"
 #include "rng.h"
 #include "soc.h"
 
 #define ROWS      8    /* M = N = min(ARR, ROWS) */
-#define K         1024
+#define KCAP      1024 /* K = min(KMAX, KCAP) */
 #define GAP_WORDS 64   /* CPU words in each gap: 16 blocks of 16 bytes */
 #define GAPS      5
-#define PASSES    2
 
 static struct {
     uint32_t gap0[GAP_WORDS];
-    int8_t a[ROWS][K];
+    int8_t a[ROWS][KCAP];
     uint32_t gap1[GAP_WORDS];
-    int8_t b[ROWS][K];
+    int8_t b[ROWS][KCAP];
     uint32_t gap2[GAP_WORDS];
     int32_t bias[ROWS];
     uint32_t gap3[GAP_WORDS];
@@ -41,7 +44,8 @@ static struct {
     uint32_t gap4[GAP_WORDS];
 } mem __attribute__((aligned(16)));
 
-_Static_assert(sizeof mem.bias % 16 == 0 && sizeof mem.c % 16 == 0 && sizeof mem.gap0 % 16 == 0,
+_Static_assert(sizeof mem.a % 16 == 0 && sizeof mem.bias % 16 == 0 && sizeof mem.c % 16 == 0 &&
+                   sizeof mem.gap0 % 16 == 0,
                "every part of mem must be whole 16-byte blocks");
 
 static uint32_t ref[GAPS][GAP_WORDS];
@@ -75,6 +79,18 @@ static uint32_t hash(const void *p, uint32_t len) {
     return h;
 }
 
+/*
+ * Twice the longest the command can take: the NPU cycle formula of
+ * docs/npu.md section 6 (LOAD + COMPUTE + WB) with the narrowest, 4-byte,
+ * DMA port, where LOAD is (M + N) * ceil(K / 4) + N bias words + 1.
+ */
+static uint32_t npu_cycle_bound(const gemm_op_t *op) {
+    uint32_t load = (op->m + op->n) * ((op->k + 3) / 4) + op->n + 1;
+    uint32_t compute = op->k + op->m + op->n + 2;
+    uint32_t wb = op->m * op->n + 6;
+    return 2 * (load + compute + wb);
+}
+
 static void start(const gemm_op_t *op) {
     REG32(NPU_A_ADDR) = (uint32_t)(uintptr_t)op->a;
     REG32(NPU_B_ADDR) = (uint32_t)(uintptr_t)op->b;
@@ -92,7 +108,7 @@ static void start(const gemm_op_t *op) {
     REG32(NPU_CTRL) = NPU_CTRL_START;
 }
 
-static int run_case(const char *name, uint32_t dim, uint32_t quant, int16_t qmult) {
+static int run_case(const char *name, uint32_t dim, uint32_t k, uint32_t quant, int16_t qmult) {
     rng_fill_i8(&rng, &mem.a[0][0], sizeof mem.a);
     rng_fill_i8(&rng, &mem.b[0][0], sizeof mem.b);
     for (uint32_t i = 0; i < ROWS; i++) {
@@ -109,20 +125,18 @@ static int run_case(const char *name, uint32_t dim, uint32_t quant, int16_t qmul
     gemm_op_t op = {
         .a = &mem.a[0][0], .b = &mem.b[0][0], .c = mem.c,
         .bias = (quant & NPU_QUANT_OUT_INT8) ? mem.bias : NULL,
-        .m = dim, .n = dim, .k = K, .a_stride = K, .b_stride = K, .c_stride = sizeof mem.c[0],
-        .quant = quant, .qmult = qmult,
+        .m = dim, .n = dim, .k = k, .a_stride = KCAP, .b_stride = KCAP,
+        .c_stride = sizeof mem.c[0], .quant = quant, .qmult = qmult,
     };
+    uint32_t bound = npu_cycle_bound(&op);
 
     start(&op);
-    uint32_t sum = 0, busy_after_first = 0;
-    for (uint32_t pass = 0; pass < PASSES; pass++) {
-        for (uint32_t g = 0; g < GAPS; g++) {
-            sum = mix(gaps[g], pass * GAPS + g, sum);
-            if (pass == 0 && g == 0) {
-                busy_after_first = REG32(NPU_STATUS) & NPU_STATUS_BUSY;
-            }
-        }
-    }
+    uint32_t busy_at_start = REG32(NPU_STATUS) & NPU_STATUS_BUSY;
+    uint32_t first = rdinstret(), sum = 0, slices = 0;
+    do {
+        sum = mix(gaps[slices % GAPS], slices, sum);
+        slices++;
+    } while (rdinstret() - first < bound);
     uint32_t done_at_end = REG32(NPU_STATUS) & NPU_STATUS_DONE;
     uint32_t status;
     do {
@@ -132,10 +146,8 @@ static int run_case(const char *name, uint32_t dim, uint32_t quant, int16_t qmul
     uint32_t cycles = REG32(NPU_CYCLES);
 
     uint32_t ref_sum = 0;
-    for (uint32_t pass = 0; pass < PASSES; pass++) {
-        for (uint32_t g = 0; g < GAPS; g++) {
-            ref_sum = mix(ref[g], pass * GAPS + g, ref_sum);
-        }
+    for (uint32_t s = 0; s < slices; s++) {
+        ref_sum = mix(ref[s % GAPS], s, ref_sum);
     }
     int cpu_ok = sum == ref_sum;
     for (uint32_t g = 0; g < GAPS; g++) {
@@ -148,14 +160,14 @@ static int run_case(const char *name, uint32_t dim, uint32_t quant, int16_t qmul
     int c_ok = !(status & NPU_STATUS_ERR) && memcmp(mem.c, c_sw, sizeof c_sw) == 0;
     int operands_ok = operands == (hash(mem.a, sizeof mem.a) ^ hash(mem.b, sizeof mem.b) ^
                                    hash(mem.bias, sizeof mem.bias));
-    int overlap_ok = cycles == 0 || (busy_after_first && done_at_end);
+    int overlap_ok = cycles == 0 || (busy_at_start && done_at_end);
 
-    printf("%s %ux%ux%u: C %s, operands %s, CPU data %s\n", name, dim, dim, (uint32_t)K,
+    printf("%s %ux%ux%u: C %s, operands %s, CPU data %s\n", name, dim, dim, k,
            c_ok ? "ok" : "WRONG", operands_ok ? "ok" : "CHANGED", cpu_ok ? "ok" : "WRONG");
     if (!overlap_ok) {
-        printf("  the CPU work did not overlap the whole command (busy after the first slice %u, "
-               "done at the end %u, %u NPU cycles)\n", busy_after_first != 0, done_at_end != 0,
-               cycles);
+        printf("  the CPU work did not overlap the whole command: busy right after START %u, "
+               "done after the work %u; the command took %u NPU cycles, the work at least %u "
+               "instructions\n", busy_at_start != 0, done_at_end != 0, cycles, bound);
     }
     return !(c_ok && operands_ok && cpu_ok && overlap_ok);
 }
@@ -163,16 +175,17 @@ static int run_case(const char *name, uint32_t dim, uint32_t quant, int16_t qmul
 int main(void) {
     printf("npu_concurrent: CPU DMEM traffic during NPU DMA\n");
     npu_info_t info = npu_info();
-    if (info.arr < 2 || info.kmax < K) {
+    if (info.arr == 0 || info.kmax == 0) {
         printf("unexpected INFO register\nFAIL\n");
         return 1;
     }
     uint32_t dim = info.arr < ROWS ? info.arr : ROWS;
+    uint32_t k = info.kmax < KCAP ? info.kmax : KCAP;
     int failures = 0;
-    failures += run_case("int32", dim, 0, 1);
+    failures += run_case("int32", dim, k, 0, 1);
     /* Sums of 1024 random products have a standard deviation near 175000;
      * 24 / 2^16 maps that to about 64. */
-    failures += run_case("int8 bias relu", dim,
+    failures += run_case("int8 bias relu", dim, k,
                          NPU_QUANT_OUT_INT8 | NPU_QUANT_RELU | NPU_QUANT_SHIFT(16), 24);
     printf("%s\n", failures ? "FAIL" : "PASS");
     return failures;
