@@ -21,6 +21,19 @@ RV32UM := $(basename $(notdir $(wildcard $(SUITE_DIR)/rv32um/*.S)))
 TESTS := $(addprefix rv32ui-p-,$(RV32UI)) $(addprefix rv32um-p-,$(RV32UM))
 ELFS  := $(addprefix $(OUT)/,$(addsuffix .elf,$(TESTS)))
 
+# The test list comes from the submodule. Without it the list is empty and
+# every run would "pass" without running anything, so refuse to go on; a
+# count other than 48 means the submodule or the exclusions changed.
+EXPECTED_TESTS := 48
+ifneq ($(MAKECMDGOALS),clean)
+  ifeq ($(strip $(TESTS)),)
+    $(error riscv-tests submodule missing: run git submodule update --init verif/riscv-tests/riscv-tests)
+  endif
+  ifneq ($(words $(TESTS)),$(EXPECTED_TESTS))
+    $(error expected $(EXPECTED_TESTS) riscv-tests (rv32ui + rv32um without $(EXCLUDE)), found $(words $(TESTS)))
+  endif
+endif
+
 TEST_CFLAGS := $(RV_FLAGS) -Ienv -I$(REPO_ROOT)/sw/common -I$(SUITE_DIR)/macros/scalar
 TEST_LDFLAGS := $(RV_FLAGS) $(RV_LDFLAGS) -T$(REPO_ROOT)/sw/common/link.ld
 
