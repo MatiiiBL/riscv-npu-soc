@@ -493,7 +493,11 @@ class Generator:
         for _, _, lines in self.subs:
             self.lines.extend(lines)
 
-        words = [self.rng.u32() for _ in range(SCRATCH_BYTES // 4)]
+        # The buffer contents come from their own stream, so a shorter
+        # --length yields a prefix of the same program with the same data:
+        # a failing seed can be shrunk by bisecting --length.
+        data_rng = Rng(self.seed ^ 0xD1B54A32D192ED03)
+        words = [data_rng.u32() for _ in range(SCRATCH_BYTES // 4)]
         data = []
         for i in range(0, len(words), 8):
             data.append("    .word " + ", ".join(f"{w:#010x}" for w in words[i:i + 8]))
