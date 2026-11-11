@@ -64,11 +64,11 @@ Footprint of every program (`make -C sw size`):
 | recursion  |  3,964 |     636 |  3.4% |
 | crc32      |  3,720 |   6,768 |  5.7% |
 | sort       |  4,004 |  12,504 |  7.9% |
-| npu_gemm   | 13,728 |  76,432 | 32.3% |
-| npu_ksplit |  8,716 |  82,572 | 34.6% |
+| npu_gemm   | 14,616 |  76,444 | 32.3% |
+| npu_ksplit |  8,844 |  82,572 | 34.6% |
 | coremark   | 10,564 |   4,484 |  4.8% |
-| gemm       |  8,064 |  99,580 | 41.1% |
-| mnist      |  8,880 | 187,044 | 74.5% |
+| gemm       |  8,192 |  99,580 | 41.1% |
+| mnist      |  9,008 | 187,044 | 74.5% |
 
 `mnist` is the largest: 102 KB of weights and 78 KB of test images.
 
