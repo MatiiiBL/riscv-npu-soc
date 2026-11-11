@@ -1,0 +1,19 @@
+npu_ksplit: K beyond KMAX
+NPU: ARR=8 KMAX=1024
+npu_gemm M=1 N=1 K=1025 int32: 2 commands ok
+npu_gemm M=1 N=1 K=1025 int8: 2 commands ok
+npu_gemm M=8 N=8 K=1025 int32: 2 commands ok
+npu_gemm M=8 N=8 K=1025 int8: 2 commands ok
+npu_gemm M=8 N=8 K=1028 int32: 2 commands ok
+npu_gemm M=8 N=8 K=1028 int8: 2 commands ok
+npu_gemm M=5 N=3 K=2048 int32: 2 commands ok
+npu_gemm M=5 N=3 K=2048 int8: 2 commands ok
+npu_gemm M=8 N=8 K=2051 int32: 3 commands ok
+npu_gemm M=8 N=8 K=2051 int8: 3 commands ok
+npu_gemm M=13 N=9 K=3067 int32: 12 commands ok
+npu_gemm M=13 N=9 K=3067 int8: 12 commands ok
+npu_gemm M=2 N=13 K=3000 int32: 6 commands ok
+npu_gemm M=2 N=13 K=3000 int8: 6 commands ok
+by hand  M=8 N=7 K=2000 int32: 9 commands ok
+by hand  M=8 N=7 K=2000 int8: 9 commands ok
+PASS
