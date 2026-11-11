@@ -432,7 +432,7 @@ Yosys `synth_ecp5` of `soc_top`, NPU included, with the `hello` image
 
 | Resource | `NPU_DMA_BYTES = 4` | `= 16` | Notes |
 |----------|-------------------:|-------:|-------|
-| LUT4 | 10132 | 10656 | 12.7% of an ECP5-85F at 16 |
+| LUT4 | 10132 | 10656 | with 2 per CCU2C, 14096 LUTs (16.9% of an ECP5-85F) at 16 |
 | CCU2C | 1693 | 1720 | carry chains |
 | TRELLIS_FF | 7188 | 7190 | |
 | DP16KD | 167 | 175 | DMEM 128 in both, IMEM 29, BTB 2, NPU operand buffers 8 / 16 |
