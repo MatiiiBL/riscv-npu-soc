@@ -5,7 +5,9 @@
 #   SRCS := hello.c
 #   include ../../common/common.mk
 #
-# Produces $(BUILD_DIR)/sw/<PROG>.elf plus .dis (disassembly) and .bin.
+# Produces $(BUILD_DIR)/sw/<PROG>.elf and its disassembly (.dis). No flat
+# binary: IMEM (0x0) and DMEM (0x1000_0000) are 256 MiB apart, so objcopy
+# -O binary would write 256 MiB of padding per program. Loaders read the ELF.
 
 include $(dir $(lastword $(MAKEFILE_LIST)))../../mk/toolchain.mk
 
@@ -31,7 +33,7 @@ vpath %.c $(sort $(dir $(abspath $(ALL_SRCS))))
 vpath %.S $(sort $(dir $(abspath $(ALL_SRCS))))
 
 .PHONY: all clean
-all: $(ELF) $(ELF:.elf=.dis) $(ELF:.elf=.bin)
+all: $(ELF) $(ELF:.elf=.dis)
 
 $(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
 	$(RV_CC) $(CFLAGS) -c $< -o $@
@@ -46,13 +48,10 @@ $(ELF): $(OBJS) $(SW_COMMON)/link.ld
 %.dis: %.elf
 	$(RV_OBJDUMP) -d $< > $@
 
-%.bin: %.elf
-	$(RV_OBJCOPY) -O binary $< $@
-
 $(OBJ_DIR):
 	mkdir -p $@
 
 clean:
-	rm -rf $(OBJ_DIR) $(ELF) $(ELF:.elf=.dis) $(ELF:.elf=.bin)
+	rm -rf $(OBJ_DIR) $(ELF) $(ELF:.elf=.dis)
 
 -include $(OBJS:.o=.d)

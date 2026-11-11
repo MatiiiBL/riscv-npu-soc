@@ -37,7 +37,10 @@ of 32-bit operands (`(int64_t)a * b`) and 64-bit shifts are fine; clang
 emits `mul`/`mulh` and inline shift sequences for them.
 
 `make sw` builds every program into `build/sw/<name>.elf`, with a
-disassembly (`.dis`) and a raw image (`.bin`) next to it.
+disassembly (`.dis`) next to it. There is no flat binary: IMEM and DMEM
+are 256 MiB apart in the address space, so one would be almost all
+padding. Every loader reads the ELF (`tools/elf2hex.py` turns it into
+block-RAM images for the FPGA).
 
 ## Memory layout and startup
 
