@@ -195,8 +195,8 @@ KC = K if K <= KMAX, else KMAX rounded down to a multiple of 4
   and `QMULT` are the same for every tile, so between commands the driver
   rewrites only the operand addresses and, at the edges, M, N and K.
 - **ARR and KMAX come from `INFO`**, so the same binary drives a differently
-  sized array; `make -C sw test` runs the NPU tests on the ISS for every
-  ARR from 2 to 7 as well as the default 8.
+  sized array; `make -C sw npu-sweep` runs the NPU tests on the ISS for
+  ARR 1 to 8 crossed with KMAX 3, 4, 16, 64, 65 and 1024 (see Tests).
 - A GEMM takes `ceil(M/ARR) * ceil(N/NS) * ceil(K/KC)` commands, each with a
   fixed cost (register writes, polling, the write-back pipeline), so small
   K and narrow tiles amortize poorly; the GEMM benchmark shows where this
@@ -251,6 +251,23 @@ Tests print only deterministic text (no cycle counts), so one
 and KMAX from `INFO`, so on the ISS they run again with `--npu-arr` set to
 each size in `NPU_ARRS` (default `2 3 4 5 6 7`); `expected.txt` holds the
 ARR = 8 output, so those runs are judged by the exit code.
+
+`make -C sw npu-sweep` goes further: every NPU test on the ISS for each ARR
+in `SWEEP_ARRS` (default 1 to 8) crossed with each KMAX in `SWEEP_KMAXS`
+(default 3, 4, 16, 64, 65, 1024), 240 runs in about two seconds. A test that
+does not support a size prints why and exits with `EXIT_SKIP` (77, from
+`soc.h`), the usual "skipped" code of test harnesses; every other target
+counts that as a failure. The sweep accepts a skip only where
+`SWEEP_SKIPS` says the test documents one, so a guard that wrongly drops a
+size fails it too. Supported sizes:
+
+| Test | ARR | KMAX |
+|------|-----|------|
+| `npu_gemm` | 1..16 | 4..1024 (section 4 splits K into word-aligned chunks of at most KMAX) |
+| `npu_ksplit` | 1..13 | 1..1033; below 4, where no K chunk can start on a word boundary, it checks that `npu_gemm()` refuses K > KMAX (`NPU_UNSUPPORTED`) |
+| `npu_concurrent` | any | any (K = min(KMAX, 1024)) |
+| `npu_oob` | 2 and up | 8 and up (2 x 2 x 8 commands) |
+| `npu_overlap` | 2 and up | 4 and up (2 x 2 x 4 commands) |
 
 | Test | Checks |
 |------|--------|
