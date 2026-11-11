@@ -12,8 +12,9 @@
 //    is write-before-read, which covers the WB -> ID distance.
 //  * A load followed by an instruction that reads its result stalls ID once;
 //    the load data then reaches EX through the MEM/WB forward.
-//  * DIV/REM hold EX for 34 cycles while the iterative divider runs; MUL is a
-//    single-cycle EX operation.
+//  * MUL takes its operands in EX and multiplies in MEM, so an instruction
+//    that reads the product right away also stalls ID once. DIV/REM hold EX
+//    for 34 cycles while the iterative divider runs.
 //  * ECALL, EBREAK and illegal instructions flush everything younger when
 //    they reach EX, retire normally from WB and then raise `halted`.
 //
@@ -63,6 +64,7 @@ module rv32_core #(
   // Pipeline control, produced further down.
   logic        stall_d;        // hold IF and ID
   logic        lu_hazard;      // load in EX feeds the instruction in ID
+  logic        mu_hazard;      // multiply in EX feeds the instruction in ID
   logic        div_stall;      // divide in EX not finished: hold IF, ID, EX
   logic        redirect_x;     // EX found a misprediction
   logic [31:0] redirect_pc_x;
@@ -221,17 +223,24 @@ module rv32_core #(
   logic [31:0]        bp_tgt_x;
   logic               tgt_ok_x;      // predicted target equals tgt_x
 
-  // Load-use: the only data hazard forwarding cannot cover. A divide sitting
-  // in EX is never a load, so this and div_stall are mutually exclusive.
-  assign lu_hazard = valid_x && is_load_x && rd_we_x && valid_d &&
-                     ((uses_rs1_d && rs1_d == rd_x) || (uses_rs2_d && rs2_d == rd_x));
-  assign stall_d   = lu_hazard || div_stall;
+  // The data hazards forwarding cannot cover: a load or a multiply in EX
+  // whose result the instruction in ID reads. Neither result exists before
+  // the end of MEM, so ID waits a cycle. A divide sitting in EX is neither,
+  // so these and div_stall are mutually exclusive.
+  logic is_mul_x, rd_match_x;
+
+  assign is_mul_x   = (res_sel_x == rv32_pkg::RES_MUL);
+  assign rd_match_x = valid_x && rd_we_x && valid_d &&
+                      ((uses_rs1_d && rs1_d == rd_x) || (uses_rs2_d && rs2_d == rd_x));
+  assign lu_hazard  = rd_match_x && is_load_x;
+  assign mu_hazard  = rd_match_x && is_mul_x;
+  assign stall_d    = lu_hazard || mu_hazard || div_stall;
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       valid_x <= 1'b0;
     end else if (!div_stall) begin
-      valid_x <= valid_d && !lu_hazard && !redirect_x && !halt_x;
+      valid_x <= valid_d && !lu_hazard && !mu_hazard && !redirect_x && !halt_x;
     end
   end
 
@@ -276,13 +285,14 @@ module rv32_core #(
   logic        valid_w, rd_we_w;
 
   logic [31:0] fwd1_x, fwd2_x, op_a_x, op_b_x, alu_y_x;
-  logic [31:0] link_x, jalr_tgt_x, act_tgt_x, csr_y_x, mul_y_x, div_y_x, res_x;
+  logic [31:0] link_x, jalr_tgt_x, act_tgt_x, csr_y_x, mul_y_m, div_y_x, res_x;
   logic        div_done_x;
   logic        cmp_eq_x, cmp_lt_x, cmp_ltu_x, cond_x;
   logic        taken_x, tgt_match_x;
 
-  // The MEM-stage result is never a load's data here: lu_hazard guarantees
-  // a consumer of a load is still in ID while the load is in MEM.
+  // The MEM-stage result is never a load's data or a product here: the
+  // interlocks guarantee that their consumers are still in ID while the
+  // producer is in MEM.
   always_comb begin
     if (valid_m && rd_we_m && rd_m == rs1_x)      fwd1_x = res_m;
     else if (valid_w && rd_we_w && rd_w == rs1_x) fwd1_x = wb_data_w;
@@ -315,7 +325,7 @@ module rv32_core #(
     .op       (insn_x[13:12]),
     .a        (fwd1_x),
     .b        (fwd2_x),
-    .mul_y    (mul_y_x),
+    .mul_y    (mul_y_m),
     .div_req  (valid_x && is_div_x),
     .div_done (div_done_x),
     .div_y    (div_y_x)
@@ -385,11 +395,11 @@ module rv32_core #(
     endcase
   end
 
+  // A multiply's result is selected in MEM instead (res_w below).
   always_comb begin
     case (res_sel_x)
       rv32_pkg::RES_LINK: res_x = link_x;
       rv32_pkg::RES_CSR:  res_x = csr_y_x;
-      rv32_pkg::RES_MUL:  res_x = mul_y_x;
       rv32_pkg::RES_DIV:  res_x = div_y_x;
       default:            res_x = alu_y_x;
     endcase
@@ -397,7 +407,7 @@ module rv32_core #(
 
   // EX/MEM
   logic [31:0] pc_m, insn_m, store_data_m;
-  logic        is_load_m, is_store_m, is_halt_m;
+  logic        is_load_m, is_store_m, is_mul_m, is_halt_m;
   logic [2:0]  funct3_m;
 
   always_ff @(posedge clk) begin
@@ -417,6 +427,7 @@ module rv32_core #(
     store_data_m <= fwd2_x;
     is_load_m    <= is_load_x;
     is_store_m   <= is_store_x;
+    is_mul_m     <= is_mul_x;
     is_halt_m    <= is_halt_x;
     funct3_m     <= insn_x[14:12];
   end
@@ -475,7 +486,7 @@ module rv32_core #(
     insn_w      <= insn_m;
     rd_w        <= rd_m;
     rd_we_w     <= rd_we_m;
-    res_w       <= res_m;
+    res_w       <= is_mul_m ? mul_y_m : res_m;
     is_load_w   <= is_load_m;
     is_halt_w   <= is_halt_m;
     funct3_w    <= funct3_m;

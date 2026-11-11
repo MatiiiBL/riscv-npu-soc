@@ -81,13 +81,13 @@ TEST_BEGIN
         sub     a3, a2, a1
         CHECK(a3, 4)
 
-        CASE(5)                         /* multiply: single cycle, result forwarded */
+        CASE(5)                         /* multiply: the product is one cycle late */
         rdcycle a1
         mul     a4, a6, a7
         add     a5, a4, a4
         rdcycle a2
         sub     a3, a2, a1
-        CHECK(a3, 3)
+        CHECK(a3, 4)
 
         CASE(6)                         /* divide holds EX; back-to-back divides */
         rdcycle a1

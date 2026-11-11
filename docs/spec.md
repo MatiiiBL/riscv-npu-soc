@@ -324,9 +324,12 @@ while (!(REG32(NPU_STATUS) & NPU_STATUS_DONE)) { }
   `1` = BTB (direct-mapped, `BTB_ENTRIES` default 64) + 2-bit saturating
   counter BHT. A correctly predicted taken branch costs no bubble; a
   mispredict costs the EX resolution penalty (2 bubbles).
-- M extension: `MUL*` may be single-cycle or pipelined; `DIV*`/`REM*` use an
-  iterative divider that stalls the pipeline. RISC-V corner cases
-  (divide by zero, `INT_MIN / -1`) must be exact.
+- M extension: `MUL*` take their operands in EX and produce the product at
+  the end of MEM, so an instruction that reads the product of the
+  instruction right before it costs one bubble (later ones take it from
+  the MEM/WB forward at no cost). `DIV*`/`REM*` use an iterative divider
+  that stalls the pipeline. RISC-V corner cases (divide by zero,
+  `INT_MIN / -1`) must be exact.
 - Performance counters exposed to the testbench (hierarchical or ports):
   cycles, retired instructions, load-use stalls, branch mispredicts,
   divider stall cycles.
