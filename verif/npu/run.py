@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Build npu_top with Verilator and run the cocotb suite for each configuration.
 
-    run.py [--config ARR:DMA_BYTES ...] [--kmax 1024] [--seed 1]
+    run.py [--config ARR:DMA_BYTES[:KMAX] ...] [--kmax 1024] [--seed 1]
            [--random-ops 300] [--test NAME] [--waves]
 
-The default configurations are 8:4, 8:8, 8:16 and 4:16. Exits nonzero if
-any build fails or any test fails in any configuration.
+A configuration without its own KMAX uses --kmax. The defaults are the
+shipped sizes (8:4, 8:8, 8:16, 4:16, all at KMAX 1024) and two corners
+(3:4:16, an ARR that is not a power of two; 1:16:16, a single PE on the
+widest port, where a whole row of KMAX bytes fits in one block). Exits
+nonzero if any build fails or any test fails in any configuration.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ def rtl_sources() -> list[Path]:
     return [RTL_LIST.parent / line.strip() for line in lines if line.strip()]
 
 
-DEFAULT_CONFIGS = ["8:4", "8:8", "8:16", "4:16"]
+DEFAULT_CONFIGS = ["8:4", "8:8", "8:16", "4:16", "3:4:16", "1:16:16"]
 
 
 def run_config(arr: int, dma_bytes: int, kmax: int,
@@ -68,10 +71,11 @@ def run_config(arr: int, dma_bytes: int, kmax: int,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--config", action="append", metavar="ARR:DMA_BYTES",
+    parser.add_argument("--config", action="append", metavar="ARR:DMA_BYTES[:KMAX]",
                         help="configuration to run (repeatable; default "
                              + " ".join(DEFAULT_CONFIGS) + ")")
-    parser.add_argument("--kmax", type=int, default=1024)
+    parser.add_argument("--kmax", type=int, default=1024,
+                        help="KMAX of configurations that do not give one")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--random-ops", type=int, default=300)
     parser.add_argument("--test", action="append", help="run only this test (repeatable)")
@@ -80,13 +84,16 @@ def main() -> int:
 
     summary = []
     for config in args.config or DEFAULT_CONFIGS:
-        arr, dma_bytes = (int(x) for x in config.split(":"))
-        total, failed = run_config(arr, dma_bytes, args.kmax, args)
-        summary.append((arr, dma_bytes, total, failed))
+        fields = [int(x) for x in config.split(":")]
+        if len(fields) not in (2, 3):
+            parser.error(f"--config {config}: expected ARR:DMA_BYTES[:KMAX]")
+        arr, dma_bytes, kmax = fields[0], fields[1], fields[2] if len(fields) == 3 else args.kmax
+        total, failed = run_config(arr, dma_bytes, kmax, args)
+        summary.append((arr, dma_bytes, kmax, total, failed))
 
     ok = True
-    for arr, dma_bytes, total, failed in summary:
-        print(f"npu ARR={arr} KMAX={args.kmax} DMA_BYTES={dma_bytes} seed={args.seed}: "
+    for arr, dma_bytes, kmax, total, failed in summary:
+        print(f"npu ARR={arr} KMAX={kmax} DMA_BYTES={dma_bytes} seed={args.seed}: "
               f"{total - failed}/{total} tests passed")
         ok &= failed == 0 and total > 0
     return 0 if ok else 1
