@@ -70,7 +70,7 @@ RANDRESET_SEEDS ?= 1 2 3
 # Programs whose commit log may legitimately depend on the predictor, since
 # they read the cycle counter or poll the NPU's BUSY flag: bp-compare checks
 # only their output and exit code. timing.S, built per mode, is left out.
-BP_TIMED := csr npu_gemm npu_ksplit
+BP_TIMED := csr npu_gemm npu_ksplit npu_oob npu_overlap
 SW_TESTS := $(patsubst $(REPO_ROOT)/sw/tests/%/Makefile,%,$(wildcard $(REPO_ROOT)/sw/tests/*/Makefile))
 
 SIM_UART := $(BUILD_DIR)/sim/soc_sim_uart
@@ -117,7 +117,7 @@ bp-compare: build sims
 	$(MAKE) -C $(REPO_ROOT)/sw
 	@sh ./bp_compare.sh $(SIM_BP1) $(SIM_BP0) $(OUT)/bp-compare "$(BP_TIMED)" \
 	  $(addprefix $(OUT)/,$(addsuffix .elf,$(TESTS))) \
-	  $$($(MAKE) -s -C $(REPO_ROOT)/verif/riscv-tests list | tr ' ' '\n' | sed 's|^|$(BUILD_DIR)/riscv-tests/|; s|$$|.elf|') \
+	  $$($(MAKE) -s --no-print-directory -C $(REPO_ROOT)/verif/riscv-tests list | tr ' ' '\n' | sed 's|^|$(BUILD_DIR)/riscv-tests/|; s|$$|.elf|') \
 	  $(addprefix $(BUILD_DIR)/sw/,$(addsuffix .elf,$(SW_TESTS)))
 
 # Every firmware test has an expected.txt, so the firmware runner checks the
