@@ -4,6 +4,7 @@ known answers: 19 of 19 passed
 single tiles: 200 of 200 passed
 edge shapes: 16 of 16 passed
 NO_WB / ACC_KEEP: 5 of 5 passed
+operand reuse: 9 of 9 passed
 errors: 13 of 13 passed
 tiled gemm: 40 of 40 passed
 linear layer: 1 of 1 passed

@@ -103,7 +103,7 @@ typedef struct {
 | Function | Does |
 |----------|------|
 | `npu_info()` | ARR, KMAX and version from the `INFO` register |
-| `npu_gemm_tile(op, ctrl)` | exactly one NPU command (M, N <= ARR, K <= KMAX); `ctrl` may add `NPU_CTRL_ACC_KEEP` and `NPU_CTRL_NO_WB` |
+| `npu_gemm_tile(op, ctrl)` | exactly one NPU command (M, N <= ARR, K <= KMAX); `ctrl` may add `NPU_CTRL_ACC_KEEP`, `NPU_CTRL_NO_WB`, `NPU_CTRL_A_KEEP` and `NPU_CTRL_B_KEEP` |
 | `npu_gemm(op)` | any M, N >= 0 and K >= 1, tiled as described below |
 | `npu_linear(layer, x, x_stride, y, y_stride, batch)` | a fully connected layer on a batch of input rows; `linear_t` holds weights, bias, sizes and write-back mode |
 | `npu_busy_cycles()` | sum of the NPU's own `CYCLES` over all commands since `npu_busy_cycles_reset()` |
@@ -134,8 +134,9 @@ npu_linear(&fc, images, 784, hidden, 128, 8);   /* 8 images at once */
 ### Tiling strategy
 
 The array holds one tile of ARR x ARR INT32 accumulators, so `npu_gemm()`
-walks the output tile by tile, row-major, and finishes each tile before
-starting the next:
+walks the output tile by tile and finishes each tile before starting the
+next. With the inner loop over N (the case when N has at least as many
+tiles as M; otherwise M and N swap roles and `B_KEEP` is used):
 
 ```
 for m0 in 0, ARR, 2 ARR ... < M:          M register = min(ARR, M - m0)
@@ -144,24 +145,38 @@ for m0 in 0, ARR, 2 ARR ... < M:          M register = min(ARR, M - m0)
     for k0 in 0, KC, 2 KC ... < K:        KC = KMAX rounded down to a multiple of 4
       A_ADDR = &A[m0][k0], B_ADDR = &B[n0][k0], K = min(KC, K - k0)
       CTRL = START | (k0 > 0 ? ACC_KEEP : 0) | (last chunk ? 0 : NO_WB)
+                   | (first command of the call ? 0 : A_KEEP)
 ```
 
+- **Operand loading dominates** an NPU command: the DMA brings in
+  `(m + n) * ceil(K/4)` words over one 32-bit port before the array starts,
+  against `K + m + n` cycles of compute (docs/npu.md, section 6). The NPU can
+  skip reloading A or B when a command asks for exactly the rows it loaded
+  last time (`A_KEEP` / `B_KEEP`; it compares address, stride, row count
+  and K, so any difference simply reloads). The driver holds the operand of
+  the outer loop fixed and runs the inner loop over the dimension with more
+  tiles, which minimizes loads: for a batch of 8 images through a 128-wide
+  layer, the images are loaded once instead of 16 times. The first command
+  of a call never asks to keep, because the caller may have rewritten the
+  buffers since the previous call; and C must not overlap A or B.
 - **K beyond KMAX** is split into chunks that accumulate in the array:
   every chunk but the first keeps the previous sums (`ACC_KEEP`), every
   chunk but the last skips write-back (`NO_WB`). Bias, requantization and
   ReLU happen once, in the last chunk's write-back. Chunks are a multiple of
-  4 long so that each chunk of an A or B row starts on a word boundary.
+  4 long so that each chunk of an A or B row starts on a word boundary. The
+  operand addresses change with every chunk, so a split GEMM reloads both
+  operands for every command.
 - **Registers are written once per GEMM** where possible: strides, `QUANT`
   and `QMULT` are the same for every tile, so between commands the driver
   rewrites only the operand addresses and, at the edges, M, N and K.
 - **ARR and KMAX come from `INFO`**, so the same binary drives a differently
   sized array.
-- A command count is `ceil(M/ARR) * ceil(N/ARR) * ceil(K/KC)`. Each command
-  streams `(m + n) * K` operand bytes through the single 32-bit DMA port,
-  so small K and narrow tiles are dominated by fixed per-command costs; the
-  GEMM benchmark shows where this crosses over.
+- A GEMM takes `ceil(M/ARR) * ceil(N/ARR) * ceil(K/KC)` commands, each with a
+  fixed cost (register writes, polling, the write-back pipeline), so small
+  K and narrow tiles amortize poorly; the GEMM benchmark shows where this
+  crosses over.
 - The MNIST benchmark feeds images in batches of ARR so that layer 1's
-  output tiles are full: one batch is a `8 x 784` by `128 x 784` GEMM, 16
+  output tiles are full: one batch is an `8 x 784` by `128 x 784` GEMM, 16
   commands.
 
 ## Software reference kernels
@@ -216,7 +231,7 @@ Tests print only deterministic text (no cycle counts), so one
 | `crc32` | CRC-32 and CRC-32C, bitwise and table-driven, against the published check values and each other, one-shot and chunked |
 | `recursion` | naive Fibonacci vs iterative, Ackermann, Towers of Hanoi, a recursive-descent expression parser |
 | `muldiv` | all 8 M instructions via inline asm against a reference with no M instructions, on all pairs of 16 corner operands, 500 random pairs, the ISA's division corner cases as literals, and back-to-back dependent chains |
-| `npu_gemm` | the NPU against `sw_gemm` (pinned by literal known answers): random tiles, edge shapes, every write-back option, NO_WB / ACC_KEEP sequences, all 13 invalid-command cases, tiled GEMMs, a linear layer; whole canary-filled output buffers are compared, so stray writes fail too |
+| `npu_gemm` | the NPU against `sw_gemm` (pinned by literal known answers): random tiles, edge shapes, every write-back option, NO_WB / ACC_KEEP sequences, A_KEEP / B_KEEP on commands that must reload, all 13 invalid-command cases, tiled GEMMs, a linear layer; whole canary-filled output buffers are compared, so stray writes fail too |
 | `npu_ksplit` | K beyond KMAX through `npu_gemm` and by hand with uneven chunks |
 
 ## Benchmarks

@@ -13,10 +13,13 @@
  *   3. edge shapes        1 and ARR in M/N, 1 and KMAX in K
  *   4. NO_WB / ACC_KEEP   split accumulation, re-accumulation, and an
  *                         invalid command between the halves of a split
- *   5. errors             every invalid shape, address and stride: ERR set,
+ *   5. operand reuse      A_KEEP / B_KEEP on commands that differ from the
+ *                         previous one in exactly one property the NPU
+ *                         compares, so it must reload
+ *   6. errors             every invalid shape, address and stride: ERR set,
  *                         nothing written, the next command works
- *   6. tiled GEMM         random M x N x K beyond one tile (npu_gemm)
- *   7. linear layer       npu_linear vs sw_linear
+ *   7. tiled GEMM         random M x N x K beyond one tile (npu_gemm)
+ *   8. linear layer       npu_linear vs sw_linear
  */
 #include "npu.h"
 #include "rng.h"
@@ -135,15 +138,16 @@ static int report_mismatch(const char *what, const gemm_op_t *op) {
     return 0;
 }
 
-/* Runs op on the NPU (one command, or tiled) and in software; 0 if equal. */
-static int compare(const char *what, const gemm_op_t *op, int tiled) {
+/* Runs op on the NPU (one command with ctrl, or tiled) and in software;
+ * 0 if equal. */
+static int compare(const char *what, const gemm_op_t *op, int tiled, uint32_t ctrl) {
     fill_canary(c_span(op));
     gemm_op_t sw = *op;
     sw.c = c_sw;
     sw_gemm(&sw);
     gemm_op_t hw = *op;
     hw.c = c_npu;
-    int rc = tiled ? npu_gemm(&hw) : npu_gemm_tile(&hw, 0);
+    int rc = tiled ? npu_gemm(&hw) : npu_gemm_tile(&hw, ctrl);
     if (rc != NPU_OK) {
         printf("  %s: m=%u n=%u k=%u: NPU reported ERR\n", what, op->m, op->n, op->k);
         return 1;
@@ -259,7 +263,7 @@ static int single_tiles(void) {
                                    : (uint32_t)rng_range(&rng, 1, 64);
         gemm_op_t op = random_op(m, n, k, 0, (int)(rng_next(&rng) & 1u));
         random_quant(&op);
-        failed += compare("single tile", &op, 0);
+        failed += compare("single tile", &op, 0, 0);
     }
     return section("single tiles", cases, failed);
 }
@@ -278,7 +282,7 @@ static int edge_shapes(void) {
                 random_quant(&op);
             }
             cases++;
-            failed += compare("edge shape", &op, 0);
+            failed += compare("edge shape", &op, 0, 0);
         }
     }
     return section("edge shapes", cases, failed);
@@ -379,7 +383,46 @@ static int accumulate_flags(void) {
     return section("NO_WB / ACC_KEEP", cases, failed);
 }
 
-/* ---- 5. Errors ---- */
+/* ---- 5. Operand reuse ---- */
+
+/*
+ * Every command asks to keep both operands. The first loads; the second
+ * repeats it exactly (the NPU may skip both loads); each later one changes
+ * one thing the NPU compares (an address, a stride, a row count, K) from
+ * the command before it, so that operand must be reloaded. The buffers hold
+ * random data throughout, so a stale operand gives a wrong result.
+ */
+static int operand_reuse(void) {
+    const uint32_t A = info.arr;
+    const uint32_t keep = NPU_CTRL_A_KEEP | NPU_CTRL_B_KEEP;
+    gemm_op_t seq[9];
+    seq[0] = random_op(A, A, 40, 0, 1);
+    rng_fill_i8(&rng, a_buf, sizeof a_buf);
+    rng_fill_i8(&rng, b_buf, sizeof b_buf);
+    seq[1] = seq[0];
+    seq[2] = seq[1];
+    seq[2].a += 64;
+    seq[3] = seq[2];
+    seq[3].b += 128;
+    seq[4] = seq[3];
+    seq[4].a_stride += 4;
+    seq[5] = seq[4];
+    seq[5].b_stride += 8;
+    seq[6] = seq[5];
+    seq[6].m = A / 2;
+    seq[7] = seq[6];
+    seq[7].n = A - 1;
+    seq[8] = seq[7];
+    seq[8].k = 44;
+    uint32_t failed = 0;
+    const uint32_t cases = sizeof seq / sizeof seq[0];
+    for (uint32_t i = 0; i < cases; i++) {
+        failed += compare("operand reuse", &seq[i], 0, i == 0 ? 0u : keep);
+    }
+    return section("operand reuse", cases, failed);
+}
+
+/* ---- 6. Errors ---- */
 
 static int errors(void) {
     gemm_op_t good = random_op(3, 5, 12, 0, 1);
@@ -406,7 +449,7 @@ static int errors(void) {
         uint32_t status = REG32(NPU_STATUS);
         int quiet = all_canary(c_npu, C_BYTES);
         /* The NPU must recover: the next valid command succeeds. */
-        int next = compare("command after ERR", &good, 0);
+        int next = compare("command after ERR", &good, 0, 0);
         cases++;
         if (rc != NPU_ERROR || !(status & NPU_STATUS_ERR) || !quiet || next) {
             printf("  error case %d: rc=%d status=%x wrote=%d\n", e, rc, status, !quiet);
@@ -416,7 +459,7 @@ static int errors(void) {
     return section("errors", cases, failed);
 }
 
-/* ---- 6/7. Tiled GEMM and linear layer ---- */
+/* ---- 7/8. Tiled GEMM and linear layer ---- */
 
 static int tiled(void) {
     uint32_t failed = 0;
@@ -427,7 +470,7 @@ static int tiled(void) {
         uint32_t k = (uint32_t)rng_range(&rng, 1, 160);
         gemm_op_t op = random_op(m, n, k, 0, (int)(rng_next(&rng) & 1u));
         random_quant(&op);
-        failed += compare("tiled gemm", &op, 1);
+        failed += compare("tiled gemm", &op, 1, 0);
     }
     return section("tiled gemm", cases, failed);
 }
@@ -466,6 +509,7 @@ int main(void) {
     failures += single_tiles();
     failures += edge_shapes();
     failures += accumulate_flags();
+    failures += operand_reuse();
     failures += errors();
     failures += tiled();
     failures += linear();

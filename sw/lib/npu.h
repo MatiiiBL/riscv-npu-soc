@@ -20,6 +20,16 @@
 #define NPU_OK    0
 #define NPU_ERROR (-1)
 
+/* Operand reuse: skip reloading A (or B) if the previous command loaded the
+ * same rows (same address, stride, row count and K). Results never change;
+ * the caller must not have modified those rows in between. */
+#ifndef NPU_CTRL_B_KEEP
+#define NPU_CTRL_B_KEEP (1u << 3)
+#endif
+#ifndef NPU_CTRL_A_KEEP
+#define NPU_CTRL_A_KEEP (1u << 4)
+#endif
+
 typedef struct {
     uint32_t arr;     /* the array is arr x arr processing elements */
     uint32_t kmax;    /* longest K a single command accepts         */
@@ -31,12 +41,13 @@ npu_info_t npu_info(void);
 /*
  * One NPU command for op (op->m, op->n <= ARR and op->k <= KMAX). ctrl may
  * add NPU_CTRL_ACC_KEEP (accumulate onto the previous command's sums instead
- * of starting from zero) and NPU_CTRL_NO_WB (keep the sums in the array and
- * write nothing).
+ * of starting from zero), NPU_CTRL_NO_WB (keep the sums in the array and
+ * write nothing) and NPU_CTRL_A_KEEP / NPU_CTRL_B_KEEP.
  */
 int npu_gemm_tile(const gemm_op_t *op, uint32_t ctrl);
 
-/* C = writeback(A * B^T + bias) for any M, N >= 0 and K >= 1. */
+/* C = writeback(A * B^T + bias) for any M, N >= 0 and K >= 1. C must not
+ * overlap A or B. */
 int npu_gemm(const gemm_op_t *op);
 
 /* The NPU twin of sw_linear(). */

@@ -68,14 +68,48 @@ int npu_gemm_tile(const gemm_op_t *op, uint32_t ctrl) {
     REG32(NPU_M) = op->m;
     REG32(NPU_N) = op->n;
     REG32(NPU_K) = op->k;
-    return run(ctrl & (NPU_CTRL_ACC_KEEP | NPU_CTRL_NO_WB));
+    return run(ctrl & (NPU_CTRL_ACC_KEEP | NPU_CTRL_NO_WB | NPU_CTRL_A_KEEP | NPU_CTRL_B_KEEP));
+}
+
+/* Issues every K chunk of the output tile at (m0, n0). */
+static int gemm_tile_k(const gemm_op_t *op, uint32_t arr, uint32_t kchunk, uint32_t m0,
+                       uint32_t n0, uint32_t keep) {
+    uint32_t a_row = addr(op->a) + m0 * op->a_stride;
+    uint32_t b_row = addr(op->b) + n0 * op->b_stride;
+    uint32_t c_elem = (op->quant & NPU_QUANT_OUT_INT8) ? 1u : 4u;
+    REG32(NPU_M) = min_u32(arr, op->m - m0);
+    REG32(NPU_N) = min_u32(arr, op->n - n0);
+    REG32(NPU_C_ADDR) = addr(op->c) + m0 * op->c_stride + n0 * c_elem;
+    REG32(NPU_BIAS_ADDR) = op->bias ? addr(op->bias + n0) : 0u;
+    for (uint32_t k0 = 0; k0 < op->k; k0 += kchunk) {
+        uint32_t kt = min_u32(kchunk, op->k - k0);
+        REG32(NPU_A_ADDR) = a_row + k0;
+        REG32(NPU_B_ADDR) = b_row + k0;
+        REG32(NPU_K) = kt;
+        uint32_t ctrl = keep | (k0 > 0 ? NPU_CTRL_ACC_KEEP : 0u) |
+                        (k0 + kt < op->k ? NPU_CTRL_NO_WB : 0u);
+        if (run(ctrl) != NPU_OK) {
+            return NPU_ERROR;
+        }
+    }
+    return NPU_OK;
 }
 
 /*
- * Output tiles are visited row by row; each one is finished (all of its K
- * chunks) before the next starts because the array holds a single tile of
- * accumulators. Between commands only the registers that change are
- * rewritten: the operand addresses, plus M/N/K at the edges.
+ * Each output tile is finished (all of its K chunks) before the next starts,
+ * because the array holds a single tile of accumulators. Between commands
+ * only the registers that change are rewritten: the operand addresses, plus
+ * M/N/K at the edges.
+ *
+ * Loading operands dominates an NPU command, and the NPU can skip reloading
+ * A or B when a command asks for the rows it loaded last time (A_KEEP /
+ * B_KEEP; it compares address, stride, row count and K, so a mismatch just
+ * reloads). The inner loop therefore runs over whichever of M and N has more
+ * tiles, holding the other operand fixed: for a batch of 8 images through a
+ * 128-wide layer, A is loaded once instead of 16 times. The first command
+ * of a call never asks to keep, since the caller may have rewritten the
+ * buffers since the previous call. With K split into chunks the operand
+ * addresses change every command, so nothing is kept.
  *
  * K chunks are KMAX rounded down to a multiple of 4 so that every chunk of
  * an A or B row starts on a word boundary, as the NPU requires. The bias is
@@ -92,28 +126,21 @@ int npu_gemm(const gemm_op_t *op) {
     if (arr == 0 || kchunk == 0 || op->k == 0) {
         return NPU_ERROR;
     }
-    uint32_t c_elem = (op->quant & NPU_QUANT_OUT_INT8) ? 1u : 4u;
+    uint32_t m_tiles = (op->m + arr - 1) / arr;
+    uint32_t n_tiles = (op->n + arr - 1) / arr;
+    int n_inner = n_tiles >= m_tiles;
+    uint32_t keep = n_inner ? NPU_CTRL_A_KEEP : NPU_CTRL_B_KEEP;
+    uint32_t outer_len = n_inner ? op->m : op->n;
+    uint32_t inner_len = n_inner ? op->n : op->m;
 
     program_common(op);
-    for (uint32_t m0 = 0; m0 < op->m; m0 += arr) {
-        uint32_t a_row = addr(op->a) + m0 * op->a_stride;
-        uint32_t c_row = addr(op->c) + m0 * op->c_stride;
-        REG32(NPU_M) = min_u32(arr, op->m - m0);
-        for (uint32_t n0 = 0; n0 < op->n; n0 += arr) {
-            uint32_t b_row = addr(op->b) + n0 * op->b_stride;
-            REG32(NPU_N) = min_u32(arr, op->n - n0);
-            REG32(NPU_C_ADDR) = c_row + n0 * c_elem;
-            REG32(NPU_BIAS_ADDR) = op->bias ? addr(op->bias + n0) : 0u;
-            for (uint32_t k0 = 0; k0 < op->k; k0 += kchunk) {
-                uint32_t kt = min_u32(kchunk, op->k - k0);
-                REG32(NPU_A_ADDR) = a_row + k0;
-                REG32(NPU_B_ADDR) = b_row + k0;
-                REG32(NPU_K) = kt;
-                uint32_t ctrl = (k0 > 0 ? NPU_CTRL_ACC_KEEP : 0u) |
-                                (k0 + kt < op->k ? NPU_CTRL_NO_WB : 0u);
-                if (run(ctrl) != NPU_OK) {
-                    return NPU_ERROR;
-                }
+    for (uint32_t outer = 0; outer < outer_len; outer += arr) {
+        for (uint32_t inner = 0; inner < inner_len; inner += arr) {
+            uint32_t m0 = n_inner ? outer : inner;
+            uint32_t n0 = n_inner ? inner : outer;
+            uint32_t first = outer == 0 && inner == 0;
+            if (gemm_tile_k(op, arr, kchunk, m0, n0, first ? 0u : keep) != NPU_OK) {
+                return NPU_ERROR;
             }
         }
     }
