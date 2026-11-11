@@ -77,44 +77,60 @@ jobs:
           path: build/npu/**/results.xml
           if-no-files-found: ignore
 
-  # Tests that need the Verilator SoC model (sim/). Adding a target is one
-  # line in the matrix; until sim/Makefile exists every step is skipped.
+  # Tests that need the Verilator SoC model (sim/). A new test is one matrix
+  # entry: a name, the make arguments, and the files it needs. Until those
+  # files are in the tree, the entry's steps are skipped with a notice.
   rtl:
-    name: RTL (${{ matrix.target }})
+    name: RTL (${{ matrix.name }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        target: [test-isa-rtl, test-sw, test-random]
+        include:
+          - name: riscv-tests
+            make: test-isa-rtl
+            needs: sim/Makefile
+          - name: directed core tests
+            make: -C verif/core
+            needs: sim/Makefile verif/core/Makefile
+          - name: firmware
+            make: test-sw
+            needs: sim/Makefile
+          - name: random difftest
+            make: test-random
+            needs: sim/Makefile
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: true
-      - name: Check for the SoC simulator
+      - name: Check that the tested blocks exist
         id: guard
         run: |
-          if [ -f sim/Makefile ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::sim/Makefile is not in this tree yet, so ${{ matrix.target }} is skipped"
-          fi
+          for f in ${{ matrix.needs }}; do
+            if [ ! -f "$f" ]; then
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::$f is not in this tree yet, so '${{ matrix.name }}' is skipped"
+              exit 0
+            fi
+          done
+          echo "run=true" >> "$GITHUB_OUTPUT"
       - if: steps.guard.outputs.run == 'true'
         uses: ./.github/actions/setup
         with:
           firmware: true
           hdl: true
-      - name: make ${{ matrix.target }}
+      - name: make ${{ matrix.make }}
         if: steps.guard.outputs.run == 'true'
-        run: make -j"$(nproc)" ${{ matrix.target }}
+        run: make -j"$(nproc)" ${{ matrix.make }}
       - name: Keep failing cases
         if: failure() && steps.guard.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: rtl-${{ matrix.target }}-failures
+          name: rtl-${{ strategy.job-index }}-failures
           path: |
             build/random/fail/
             build/riscv-tests/*.log
+            build/verif/core/
             build/sw/*.out
           if-no-files-found: ignore
 
