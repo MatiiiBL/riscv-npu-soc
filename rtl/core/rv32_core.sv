@@ -4,8 +4,9 @@
 //
 //  * IF presents pc_f to the synchronous IMEM and looks it up in the branch
 //    predictor in the same cycle; the BRAM output register is the IF/ID
-//    instruction register, so ID decodes imem_rdata directly. Stalling ID
-//    therefore means dropping imem_req, which makes the BRAM hold its output.
+//    instruction register, so ID decodes imem_rdata directly. IMEM reads
+//    every cycle; while ID stalls, its instruction comes from a skid
+//    register instead.
 //  * Branches and jumps resolve in EX. A wrong prediction redirects IF and
 //    kills the two younger instructions in IF and ID (2 bubbles).
 //  * Operands are forwarded into EX from the EX/MEM and MEM/WB registers;
@@ -111,16 +112,25 @@ module rv32_core #(
   // what IF did rather than re-deriving it from the counter.
   assign pred_taken_f = bp_hit_f && bp_ctr_f[1];
   assign npc_f        = pred_taken_f ? bp_tgt_f : pc_f + 32'd4;
-  assign imem_req  = !stall_d && !halt_q;
+
+  // IMEM reads pc_f every cycle, stalled or not: the stall decision comes
+  // late in the cycle (it depends on the instruction word in ID), and
+  // gating the block RAM's clock enable with it would put the whole decode
+  // and hazard check in front of the RAM. Instead, the instruction a stalled
+  // ID holds is kept in a skid register, since the RAM output already shows
+  // the next fetch.
+  assign imem_req  = !halt_q;
   assign imem_addr = pc_f;
 
-  // IF/ID. The instruction word itself is imem_rdata.
+  // IF/ID. The instruction word is imem_rdata, or skid_q while ID stalls.
   logic        valid_d;
   logic [31:0] pc_d;
   logic        pred_taken_d;
   logic        bp_hit_d;
   logic [1:0]  bp_ctr_d;
   logic [31:0] bp_tgt_d;
+  logic        skid_v;
+  logic [31:0] skid_q;
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
@@ -147,6 +157,22 @@ module rv32_core #(
     end
   end
 
+  // skid_q follows the RAM output until a stall starts, then holds the
+  // instruction ID keeps; a redirect discards it with the rest of ID.
+  always_ff @(posedge clk) begin
+    if (!rst_n || redirect_x || !stall_d) begin
+      skid_v <= 1'b0;
+    end else begin
+      skid_v <= 1'b1;
+    end
+  end
+
+  always_ff @(posedge clk) begin
+    if (!skid_v) begin
+      skid_q <= imem_rdata;
+    end
+  end
+
   // ======================================================================
   // ID
   // ======================================================================
@@ -163,7 +189,7 @@ module rv32_core #(
   logic [31:0]        rs1_val_d, rs2_val_d;
   logic [31:0]        tgt_d;
 
-  assign insn_d = imem_rdata;
+  assign insn_d = skid_v ? skid_q : imem_rdata;
 
   rv32_decode u_decode (
     .insn      (insn_d),
