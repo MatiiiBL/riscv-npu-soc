@@ -13,6 +13,10 @@
 #                 run every directed test, riscv-test and firmware test on
 #                 soc_sim and soc_sim_bp0 and require identical commit logs
 #                 (only identical output for the BP_TIMED programs)
+#   make uart-serial
+#                 run the firmware tests on build/sim/soc_sim_uart, which uses
+#                 the real UART (SIM = 0) and decodes stdout from its serial
+#                 line, and require hello to have waited on UART_STATUS
 #
 # Each test is a bare-metal assembly program that checks its own results and
 # reports through SIM_EXIT like the riscv-tests (0 = pass, (case << 1) | 1 =
@@ -69,7 +73,9 @@ RANDRESET_SEEDS ?= 1 2 3
 BP_TIMED := csr npu_gemm npu_ksplit
 SW_TESTS := $(patsubst $(REPO_ROOT)/sw/tests/%/Makefile,%,$(wildcard $(REPO_ROOT)/sw/tests/*/Makefile))
 
-.PHONY: all build sims run cli randreset bp-compare clean
+SIM_UART := $(BUILD_DIR)/sim/soc_sim_uart
+
+.PHONY: all build sims run cli randreset bp-compare uart-serial clean
 all: run cli
 
 build: $(ELFS)
@@ -113,6 +119,18 @@ bp-compare: build sims
 	  $(addprefix $(OUT)/,$(addsuffix .elf,$(TESTS))) \
 	  $$($(MAKE) -s -C $(REPO_ROOT)/verif/riscv-tests list | tr ' ' '\n' | sed 's|^|$(BUILD_DIR)/riscv-tests/|; s|$$|.elf|') \
 	  $(addprefix $(BUILD_DIR)/sw/,$(addsuffix .elf,$(SW_TESTS)))
+
+# Every firmware test has an expected.txt, so the firmware runner checks the
+# bytes that arrived over the line; a byte written while the transmitter was
+# busy is dropped by the hardware and shows up as a mismatch.
+uart-serial:
+	$(MAKE) -C $(REPO_ROOT)/sim SERIAL_UART=1
+	$(MAKE) -s -C $(REPO_ROOT)/sw test SIMS=$(SIM_UART)
+	@busy=$$($(SIM_UART) --quiet --stats $(BUILD_DIR)/sw/hello.elf 2>&1 > /dev/null | \
+	  sed -n 's/^\[rtl\] stats: UART busy polls *\([0-9][0-9]*\).*/\1/p'); \
+	if [ -z "$$busy" ] || [ "$$busy" -eq 0 ]; then \
+	  echo "FAIL: hello never found the UART busy, so backpressure was not exercised"; exit 1; fi; \
+	echo "serial UART: hello found the transmitter busy in $$busy UART_STATUS reads"
 
 run: build sims
 	@pass=0; fail=0; \

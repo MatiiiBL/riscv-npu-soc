@@ -8,6 +8,12 @@
 // starts every unreset flop and memory from random values, seed 1 unless
 // +verilator+seed+N picks another, instead of zero.
 //
+// Normal builds use soc_top's SIM = 1 taps: UART_STATUS always reads ready
+// and stdout comes from the UART_TX write strobe. A build with
+// SOC_SIM_SERIAL_UART (make -C sim SERIAL_UART=1) uses the real UART
+// instead (SIM = 0, a small UART_DIV): firmware waits on UART_STATUS, and
+// stdout is decoded from the uart_txd line.
+//
 // Each loop iteration observes one clock cycle of the settled model and then
 // clocks it. Within a cycle the retirement port (WB) is handled before the
 // MMIO write strobes (MEM), because the WB instruction is the older of the
@@ -216,6 +222,63 @@ int exit_code_for(uint32_t value) {
     return (value & 0xff) != 0 ? static_cast<int>(value & 0xff) : 1;
 }
 
+struct PerfCounters {
+    uint64_t cycles, instret;
+    uint32_t load_use, ctrl, mispredict, div_stall;
+};
+
+#ifdef SOC_SIM_SERIAL_UART
+constexpr uint32_t UART_STATUS = 0x20000004;
+
+// Receives the 8N1 frames on uart_txd, sampling each bit in its middle, so
+// that a serial build's stdout is what actually went over the line.
+class UartRx {
+public:
+    explicit UartRx(unsigned clks_per_bit) : div_(clks_per_bit) {}
+
+    // Called once per cycle with the line level. Returns true when a frame
+    // ends, with its data bits in `byte`; a frame whose start bit does not
+    // hold or whose stop bit is low counts as a framing error.
+    bool sample(bool line, uint8_t &byte) {
+        if (!busy_) {
+            if (line) {
+                return false;
+            }
+            busy_ = true;  // a start bit begins in this cycle
+            t_ = 0;
+        }
+        const unsigned t = t_++;
+        if (t % div_ != div_ / 2) {
+            return false;
+        }
+        const unsigned bit = t / div_;
+        if (bit == 0) {
+            if (line) {
+                busy_ = false;
+                errors_++;
+            }
+        } else if (bit <= 8) {
+            data_ = static_cast<uint8_t>((data_ >> 1) | (line ? 0x80 : 0));
+        } else {
+            busy_ = false;
+            errors_ += line ? 0 : 1;
+            byte = data_;
+            return true;
+        }
+        return false;
+    }
+
+    unsigned errors() const { return errors_; }
+
+private:
+    unsigned div_;
+    bool busy_ = false;
+    unsigned t_ = 0;
+    uint8_t data_ = 0;
+    unsigned errors_ = 0;
+};
+#endif
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -287,6 +350,24 @@ int main(int argc, char **argv) {
     int code = -1;
     uint32_t reported = 0;   // exit= field of the summary line
 
+#ifdef SOC_SIM_SERIAL_UART
+    // stdout carries the bytes decoded from the serial line. `written` holds
+    // the bytes stored to UART_TX before the run ended, which is what the
+    // line must carry; busy_polls counts UART_STATUS reads that saw the
+    // transmitter busy, i.e. the firmware actually waited on backpressure.
+    UartRx rx(SOC_SIM_UART_DIV);
+    std::string written;
+    size_t received = 0;
+    uint64_t busy_polls = 0;
+    auto receive = [&]() {
+        uint8_t byte = 0;
+        if (rx.sample(top->uart_txd != 0, byte)) {
+            std::fputc(byte, stdout);
+            received++;
+        }
+    };
+#endif
+
     for (;;) {
         if (top->halted) {
             code = (last_insn == INSN_ECALL || last_insn == INSN_EBREAK) ? EXIT_HALT : EXIT_ILLEGAL;
@@ -323,17 +404,30 @@ int main(int argc, char **argv) {
                 }
                 std::fputc('\n', log);
             }
+#ifdef SOC_SIM_SERIAL_UART
+            if (top->rvfi_mem_addr == UART_STATUS && top->rvfi_mem_wmask == 0 &&
+                top->rvfi_rd != 0 && (top->rvfi_rd_wdata & 1) == 0) {
+                busy_polls++;
+            }
+#endif
             done = exit_pending;   // the SIM_EXIT store itself just retired
         }
         if (!done) {
             if (top->sim_uart_valid) {
+#ifdef SOC_SIM_SERIAL_UART
+                written.push_back(static_cast<char>(top->sim_uart_data));
+#else
                 std::fputc(top->sim_uart_data, stdout);
+#endif
             }
             if (top->sim_exit_valid) {
                 exit_pending = true;
                 exit_value = top->sim_exit_code;
             }
         }
+#ifdef SOC_SIM_SERIAL_UART
+        receive();
+#endif
 
         tick();
         cycle++;
@@ -344,6 +438,26 @@ int main(int argc, char **argv) {
         }
     }
 
+    const PerfCounters perf{top->perf_cycles,     top->perf_instret,    top->perf_load_use,
+                            top->perf_ctrl,       top->perf_mispredict, top->perf_div_stall};
+
+#ifdef SOC_SIM_SERIAL_UART
+    // The last frames are still on the line when the run ends. Keep clocking
+    // until every byte written before the end has arrived; each frame takes
+    // 10 bit times, and one extra bit time per byte is slack.
+    if (received < written.size()) {
+        uint64_t budget = (written.size() - received + 1) * 11ull * SOC_SIM_UART_DIV;
+        while (received < written.size() && budget-- > 0) {
+            tick();
+            receive();
+        }
+    }
+    if (received != written.size() || rx.errors() != 0) {
+        std::fprintf(stderr, "[rtl] UART: %zu bytes written to UART_TX, %zu received on the line, "
+                     "%u framing errors\n", written.size(), received, rx.errors());
+    }
+#endif
+
     std::fflush(stdout);
     if (log != nullptr) {
         std::fclose(log);
@@ -353,24 +467,25 @@ int main(int argc, char **argv) {
     }
     top->final();
 
-    const uint64_t cycles = top->perf_cycles;
-    const uint64_t instret = top->perf_instret;
+    const uint64_t cycles = perf.cycles;
+    const uint64_t instret = perf.instret;
     const double cpi = instret != 0 ? static_cast<double>(cycles) / static_cast<double>(instret) : 0.0;
     if (!opt.quiet) {
         std::fprintf(stderr, "[rtl] cycles=%" PRIu64 " instret=%" PRIu64 " cpi=%.3f exit=0x%08x\n",
                      cycles, instret, cpi, reported);
     }
     if (opt.stats) {
-        const uint32_t ctrl = top->perf_ctrl;
-        const uint32_t mispredict = top->perf_mispredict;
         std::fprintf(stderr, "[rtl] stats: cycles           %" PRIu64 "\n", cycles);
         std::fprintf(stderr, "[rtl] stats: instret          %" PRIu64 "  (cpi %.3f)\n", instret,
                      cpi);
-        std::fprintf(stderr, "[rtl] stats: load-use stalls  %u\n", top->perf_load_use);
-        std::fprintf(stderr, "[rtl] stats: branches+jumps   %u\n", ctrl);
+        std::fprintf(stderr, "[rtl] stats: load-use stalls  %u\n", perf.load_use);
+        std::fprintf(stderr, "[rtl] stats: branches+jumps   %u\n", perf.ctrl);
         std::fprintf(stderr, "[rtl] stats: mispredicts      %u  (%.1f%% of branches+jumps)\n",
-                     mispredict, ctrl != 0 ? 100.0 * mispredict / ctrl : 0.0);
-        std::fprintf(stderr, "[rtl] stats: divider stalls   %u cycles\n", top->perf_div_stall);
+                     perf.mispredict, perf.ctrl != 0 ? 100.0 * perf.mispredict / perf.ctrl : 0.0);
+        std::fprintf(stderr, "[rtl] stats: divider stalls   %u cycles\n", perf.div_stall);
+#ifdef SOC_SIM_SERIAL_UART
+        std::fprintf(stderr, "[rtl] stats: UART busy polls  %" PRIu64 "\n", busy_polls);
+#endif
     }
     return code;
 }

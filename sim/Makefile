@@ -6,6 +6,9 @@
 #   make RANDRESET=1        build/sim/soc_sim_randreset
 #                           unreset state starts random (seed 1, or
 #                           +verilator+seed+N) instead of zero
+#   make SERIAL_UART=1      build/sim/soc_sim_uart
+#                           the real UART (SIM = 0, UART_DIV clocks per bit,
+#                           default 5); stdout is decoded from uart_txd
 #
 # The knobs combine (BP_MODE=0 NPU_DMA_BYTES=4 builds soc_sim_bp0_dma4).
 #
@@ -17,11 +20,14 @@ include ../mk/toolchain.mk
 BP_MODE       ?= 1
 NPU_DMA_BYTES ?= 16
 RANDRESET     ?= 0
+SERIAL_UART   ?= 0
+UART_DIV      ?= 5
+
+VARIANT := $(if $(filter 1,$(BP_MODE)),,_bp$(BP_MODE))$(if $(filter 16,$(NPU_DMA_BYTES)),,_dma$(NPU_DMA_BYTES))$(if $(filter 1,$(RANDRESET)),_randreset)$(if $(filter 1,$(SERIAL_UART)),_uart)
 
 SIM_DIR := $(BUILD_DIR)/sim
-SUFFIX  := $(if $(filter 1,$(BP_MODE)),,_bp$(BP_MODE))$(if $(filter 16,$(NPU_DMA_BYTES)),,_dma$(NPU_DMA_BYTES))$(if $(filter 1,$(RANDRESET)),_randreset)
-SIM_BIN := $(SIM_DIR)/soc_sim$(SUFFIX)
-OBJ_DIR := $(SIM_DIR)/obj_bp$(BP_MODE)_dma$(NPU_DMA_BYTES)$(if $(filter 1,$(RANDRESET)),_randreset)
+SIM_BIN := $(SIM_DIR)/soc_sim$(VARIANT)
+OBJ_DIR := $(SIM_DIR)/obj$(VARIANT)
 
 # The fast settings let Verilator zero what is not reset; the randomized
 # build makes every such value (and every X assignment) random instead, so
@@ -34,6 +40,13 @@ else
   CPP_DEFS :=
 endif
 
+ifeq ($(SERIAL_UART),1)
+  SOC_PARAMS := -GSIM=0 -GUART_DIV=$(UART_DIV)
+  CPP_DEFS   += -DSOC_SIM_SERIAL_UART -DSOC_SIM_UART_DIV=$(UART_DIV)
+else
+  SOC_PARAMS := -GSIM=1
+endif
+
 RTL_DIR  := $(REPO_ROOT)/rtl
 RTL_SRCS := $(wildcard $(RTL_DIR)/*/*.sv $(RTL_DIR)/*/*.f)
 CPP_SRCS := $(CURDIR)/soc_sim.cpp $(CURDIR)/elf_loader.cpp
@@ -43,7 +56,7 @@ CXX_OPT := -O3
 
 VFLAGS := --cc --exe --build -j 0 --trace \
           -O3 $(X_FLAGS) \
-          --top-module soc_top -GBP_MODE=$(BP_MODE) -GNPU_DMA_BYTES=$(NPU_DMA_BYTES) -GSIM=1 \
+          --top-module soc_top -GBP_MODE=$(BP_MODE) -GNPU_DMA_BYTES=$(NPU_DMA_BYTES) $(SOC_PARAMS) \
           --Mdir $(OBJ_DIR) -o $(SIM_BIN) \
           -CFLAGS "$(CXX_OPT) -std=c++17 $(CPP_DEFS)" \
           -MAKEFLAGS "OPT_FAST=$(CXX_OPT) OPT_SLOW=$(CXX_OPT) OPT_GLOBAL=$(CXX_OPT)"
@@ -56,4 +69,4 @@ $(SIM_BIN): $(RTL_SRCS) $(CPP_DEPS) sim.vlt Makefile
 	$(VERILATOR) $(VFLAGS) sim.vlt -F $(RTL_DIR)/soc/soc.f $(CPP_SRCS)
 
 clean:
-	rm -rf $(SIM_DIR)/obj_bp* $(SIM_DIR)/soc_sim $(SIM_DIR)/soc_sim_*
+	rm -rf $(SIM_DIR)/obj $(SIM_DIR)/obj_* $(SIM_DIR)/soc_sim $(SIM_DIR)/soc_sim_*
