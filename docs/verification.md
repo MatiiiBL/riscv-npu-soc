@@ -276,7 +276,7 @@ mini libc, the NPU driver). Firmware that does neither can also go through
 
 | Job | Runs |
 |-----|------|
-| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make -C tools/iss test`, `make test-isa-iss`, 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
+| `ISS (g++)`, `ISS (clang++)` | ISS build with `-Werror`, `make -C tools/iss test`, `make test-isa-iss`, the firmware tests on the ISS (`make -C sw test SIMS=build/iss/iss`), 100 random difftest seeds (ISS on both sides) and `make -C verif/random selftest` |
 | `NPU (lint, cocotb)` | `make lint` for every RTL top in the tree, `make test-npu` |
 | `RTL (<test>)` | `make test-isa-rtl`, `make -C verif/core`, `make test-sw` and `make test-random` against the Verilator SoC model; each is skipped with a notice while the files it needs (`sim/Makefile`, `verif/core/Makefile`) are absent |
 | `Synthesis (Yosys, ECP5)` | `synth_ecp5` of `npu_top` (and of `soc_top` through `make -C rtl synth-check` once `rtl/soc/soc.f` exists), with the cell counts in the job summary |

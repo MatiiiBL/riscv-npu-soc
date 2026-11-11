@@ -42,6 +42,8 @@ jobs:
         run: make -C tools/iss test
       - name: riscv-tests on the ISS
         run: make -j"$(nproc)" test-isa-iss
+      - name: Firmware tests on the ISS
+        run: make -j"$(nproc)" -C sw test SIMS=build/iss/iss
       - name: Random difftest, ISS against itself
         run: make -C verif/random -j"$(nproc)" SEEDS=100 LEN=2000 RTL_SIM=build/iss/iss
       - name: difftest self-test
@@ -54,6 +56,7 @@ jobs:
           path: |
             build/random/fail/
             build/riscv-tests/*.log
+            build/sw/*.out
           if-no-files-found: ignore
 
   npu:
